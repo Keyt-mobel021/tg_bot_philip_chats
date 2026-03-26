@@ -1,0 +1,6 @@
+aiogram==3.17.0
+peewee>=3.17.0
+python-dotenv>=1.0.0
+loguru>=0.7.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.12.2
