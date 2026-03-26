@@ -1,5 +1,6 @@
 """
 Хендлеры: список чатов, создание, заморозка, выход.
+ЗАДАЧА 3: удаление промежуточных сообщений при создании чата.
 """
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -13,8 +14,9 @@ from keyboards import (
     ChatCD, ChatAction,
 )
 from keyboards.kb import (
-    main_menu_keyboard, chats_list_keyboard, chat_detail_keyboard, delete_chat_confirm_keyboard,
-    freeze_confirm_keyboard, leave_confirm_keyboard, cancel_keyboard,
+    main_menu_keyboard, chats_list_keyboard, chat_detail_keyboard,
+    delete_chat_confirm_keyboard, freeze_confirm_keyboard,
+    leave_confirm_keyboard, cancel_keyboard,
 )
 from states import ChatCreateState
 
@@ -45,37 +47,111 @@ async def cb_create_chat_start(call: types.CallbackQuery, state: FSMContext, is_
         return
 
     await state.set_state(ChatCreateState.get_title)
-    await call.message.edit_text("✏️ Введите название нового чата:", reply_markup=cancel_keyboard())
+    # Сохраняем ID сообщения-запроса, чтобы потом удалить
+    sent = await call.message.edit_text("✏️ Введите название нового чата:", reply_markup=cancel_keyboard())
+    await state.update_data(prompt_msg_id=sent.message_id if sent else call.message.message_id)
     await call.answer()
 
 
 @router.message(ChatCreateState.get_title, CheckUser())
 async def fsm_chat_title(message: types.Message, state: FSMContext, **_):
+    data = await state.get_data()
     await state.update_data(title=message.text.strip())
     await state.set_state(ChatCreateState.get_description)
-    await message.answer(
+
+    # ЗАДАЧА 3: удаляем сообщение пользователя с названием
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Редактируем прошлое сообщение-запрос (или отправляем новое)
+    prompt_msg_id = data.get('prompt_msg_id')
+    if prompt_msg_id:
+        try:
+            sent = await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=prompt_msg_id,
+                text="📝 Введите описание чата (или отправьте «-» чтобы пропустить):",
+                reply_markup=cancel_keyboard(),
+            )
+            await state.update_data(prompt_msg_id=sent.message_id)
+            return
+        except Exception:
+            pass
+
+    sent = await message.answer(
         "📝 Введите описание чата (или отправьте «-» чтобы пропустить):",
         reply_markup=cancel_keyboard(),
     )
+    await state.update_data(prompt_msg_id=sent.message_id)
 
 
 @router.message(ChatCreateState.get_description, CheckUser())
-async def fsm_chat_description(message: types.Message, state: FSMContext, user: models.UserTelegram, profile: models.Profile | None = None):
-    data = await state.get_data()
+async def fsm_chat_description(message: types.Message, state: FSMContext, **_):
     description = message.text.strip()
     if description == '-':
         description = None
+    await state.update_data(description=description)
+    await state.set_state(ChatCreateState.get_filters)
 
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    prompt_msg_id = data.get('prompt_msg_id')
+    if prompt_msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=prompt_msg_id,
+                text="🚫 Введите regex фильтры для чата (каждая строка — отдельный).\n\n"
+                     "Или отправьте «-» чтобы пропустить:",
+                reply_markup=cancel_keyboard(),
+            )
+            return
+        except Exception:
+            pass
+
+    sent = await message.answer(
+        "🚫 Введите regex фильтры для чата (каждая строка — отдельный).\n\n"
+        "Или отправьте «-» чтобы пропустить:",
+        reply_markup=cancel_keyboard(),
+    )
+    await state.update_data(prompt_msg_id=sent.message_id)
+
+@router.message(ChatCreateState.get_filters, CheckUser())
+async def fsm_chat_filters(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+):
+    data = await state.get_data()
+    raw = message.text.strip()
     await state.clear()
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    prompt_msg_id = data.get('prompt_msg_id')
+    if prompt_msg_id:
+        try:
+            await message.bot.delete_message(chat_id=message.chat.id, message_id=prompt_msg_id)
+        except Exception:
+            pass
 
     with models.connector:
         chat = models.Chat.create(
             title=data['title'],
-            description=description,
+            description=data.get('description'),
             creator_id=profile.id if profile else None,
         )
 
-        # Добавляем создателя как участника-администратора
         if profile:
             models.ChatMember.create(
                 chat_id=chat.id,
@@ -105,8 +181,20 @@ async def fsm_chat_description(message: types.Message, state: FSMContext, user: 
             except Exception as e:
                 logger.warning(f"AutoConnect error: {e}")
 
-    await show_chats_list(message, user, is_admin_or_manager=True, prefix=f"✅ Чат <b>{chat.title}</b> создан!")
+        # Фильтры чата
+        filter_count = 0
+        if raw != '-':
+            patterns = [line.strip() for line in raw.splitlines() if line.strip()]
+            for p in patterns:
+                models.ChatFilter.create(chat_id=chat.id, pattern=p)
+            filter_count = len(patterns)
 
+    prefix = f"✅ Чат <b>{chat.title}</b> создан!"
+    if filter_count:
+        prefix += f"\n🚫 Добавлено фильтров: {filter_count}"
+
+    await show_chats_list(message, user, is_admin_or_manager=True, prefix=prefix)
+    
 
 # ══════════════════════════════════════════════
 #  Детали чата
@@ -149,7 +237,12 @@ async def cb_freeze_confirm(call: types.CallbackQuery, callback_data: ChatCD, is
     chat_id = callback_data.chat_id
 
     if not confirmed:
-        await call.message.delete()
+        # ЗАДАЧА 10: «Нет» — возвращаемся на карточку чата
+        with models.connector:
+            user = models.UserTelegram.get_or_none(
+                models.UserTelegram.id == call.from_user.id
+            )
+        await show_chat_detail(call, chat_id, user, is_admin_or_manager=True)
         await call.answer("Отменено")
         return
 
@@ -181,7 +274,12 @@ async def cb_freeze_confirm(call: types.CallbackQuery, callback_data: ChatCD, is
             except Exception:
                 pass
 
-    await show_chat_detail(call, chat_id, prefix=f"✅ {notify}")
+    with models.connector:
+        user = models.UserTelegram.get_or_none(
+            models.UserTelegram.id == call.from_user.id
+        )
+    await show_chat_detail(call, chat_id, user, is_admin_or_manager=True,
+                           prefix=f"✅ {notify}")
     await call.answer()
 
 
@@ -189,7 +287,12 @@ async def cb_freeze_confirm(call: types.CallbackQuery, callback_data: ChatCD, is
 #  Выйти из чата
 # ══════════════════════════════════════════════
 @router.callback_query(ChatCD.filter(F.action == ChatAction.leave), CheckUser())
-async def cb_leave_ask(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram, is_admin_or_manager: bool):
+async def cb_leave_ask(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    user: models.UserTelegram,
+    is_admin_or_manager: bool,
+):
     if is_admin_or_manager:
         await call.answer("Администраторы/руководители не могут выходить из чата", show_alert=True)
         return
@@ -207,10 +310,16 @@ async def cb_leave_ask(call: types.CallbackQuery, callback_data: ChatCD, user: m
 
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.leave_confirm), CheckUser())
-async def cb_leave_confirm(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram, is_admin_or_manager: bool):
+async def cb_leave_confirm(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    user: models.UserTelegram,
+    is_admin_or_manager: bool,
+):
     confirmed = callback_data.page == 1
     if not confirmed:
-        await call.message.delete()
+        # ЗАДАЧА 10: Нет — возвращаемся на карточку чата
+        await show_chat_detail(call, callback_data.chat_id, user, is_admin_or_manager=False)
         await call.answer("Отменено")
         return
 
@@ -233,8 +342,8 @@ async def cb_leave_confirm(call: types.CallbackQuery, callback_data: ChatCD, use
                     models.MemberType.ADMIN, models.MemberType.MANAGER
                 ]))
             ))
-        user = call.from_user
-        name = user.full_name or str(user.id)
+        tg_user = call.from_user
+        name = tg_user.full_name or str(tg_user.id)
         for a in admins:
             if a.user_id_id:
                 try:
@@ -254,12 +363,15 @@ async def cb_leave_confirm(call: types.CallbackQuery, callback_data: ChatCD, use
 #  Назад к списку чатов
 # ══════════════════════════════════════════════
 @router.callback_query(ChatCD.filter(F.action == ChatAction.back), CheckUser())
-async def cb_chat_back(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram, profile: models.Profile | None, is_admin_or_manager: bool):
+async def cb_chat_back(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    user: models.UserTelegram,
+    profile: models.Profile | None,
+    is_admin_or_manager: bool,
+):
     await show_chats_list(call, user, is_admin_or_manager, page=0)
     await call.answer()
-
-
-
 
 
 # ══════════════════════════════════════════════
@@ -289,33 +401,20 @@ async def cb_delete_chat_ask(call: types.CallbackQuery, callback_data: ChatCD, i
 
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.delete_confirm), CheckUser())
-async def cb_delete_chat_confirm(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram, is_admin_or_manager: bool):
+async def cb_delete_chat_confirm(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    user: models.UserTelegram,
+    is_admin_or_manager: bool,
+):
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
 
-    # page=0 — нажали "Нет"
+    # page=0 — нажали «Нет»
     if callback_data.page != 1:
-        with models.connector:
-            chat = models.Chat.get_or_none(models.Chat.id == callback_data.chat_id)
-            members_count = models.ChatMember.select().where(
-                models.ChatMember.chat_id == callback_data.chat_id
-            ).count()
-
-        status = "❄️ Заморожен" if chat and chat.is_frozen else "✅ Активен"
-        text = (
-            f"💬 <b>{chat.title}</b>\n\n"
-            f"📊 Статус: {status}\n"
-            f"👥 Участников: {members_count}\n"
-        )
-        if chat and chat.description:
-            text += f"\n📝 {chat.description}"
-
-        await call.message.edit_text(
-            text,
-            reply_markup=chat_detail_keyboard(callback_data.chat_id, chat.is_frozen if chat else False, True),
-            parse_mode="HTML",
-        )
+        # ЗАДАЧА 10: возвращаемся на карточку чата
+        await show_chat_detail(call, callback_data.chat_id, user, is_admin_or_manager=True)
         await call.answer("Отменено")
         return
 
@@ -328,8 +427,6 @@ async def cb_delete_chat_confirm(call: types.CallbackQuery, callback_data: ChatC
             return
 
         chat_title = chat.title
-
-        # Уведомляем участников перед удалением
         members = list(models.ChatMember.select().where(
             models.ChatMember.chat_id == chat_id
         ))
@@ -346,17 +443,38 @@ async def cb_delete_chat_confirm(call: types.CallbackQuery, callback_data: ChatC
                 pass
 
     with models.connector:
-        chat.delete_instance(recursive=True)  # cascade удалит участников, сообщения, вложения
+        chat.delete_instance(recursive=True)
 
-    # Возвращаемся к списку чатов через show_chats_list если используешь menu_helpers,
-    # или напрямую:
+    await show_chats_list(call, user, is_admin_or_manager=True,
+                          prefix=f"✅ Чат <b>{chat_title}</b> удалён.")
+    await call.answer()
+
+
+@router.callback_query(ChatCD.filter(F.action == ChatAction.join), CheckUser())
+async def cb_join_chat(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram, profile: models.Profile | None, is_admin_or_manager: bool):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    chat_id = callback_data.chat_id
+
     with models.connector:
-        all_chats = list(models.Chat.select().where(models.Chat.is_visible == True))
+        existing = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        if existing:
+            await call.answer("Вы уже в этом чате", show_alert=True)
+            return
 
-    await call.message.edit_text(
-        f"✅ Чат <b>{chat_title}</b> удалён.\n\n"
-        f"💬 <b>Чаты</b> ({len(all_chats)})",
-        reply_markup=chats_list_keyboard(all_chats, page=0, can_create=True),
-        parse_mode="HTML",
-    )
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        models.ChatMember.create(
+            chat_id=chat_id,
+            user_id=user.id,
+            profile_id=profile.id if profile else None,
+            member_type=models.MemberType.ADMIN if is_admin_or_manager else models.MemberType.EMPLOYEE,
+        )
+
+    await show_chat_detail(call, chat_id, user, is_admin_or_manager,
+                           prefix=f"✅ Вы присоединились к чату <b>{chat.title}</b>!")
     await call.answer()

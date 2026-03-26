@@ -36,17 +36,24 @@ class ChatsCD(CallbackData, prefix="chats"):
 # ══════════════════════════════════════════════
 class ChatAction(str, Enum):
     write = "write"
+    write_from_history = "wfh"
     history = "history"
     freeze = "freeze"
     freeze_confirm = "freeze_confirm"
     members = "members"
     leave = "leave"
+    filters = "filters"
     leave_confirm = "leave_confirm"
     back = "back"
     delete = "delete"
     delete_confirm = "delete_confirm"
     description = "description"
-    edit_description = "edit_description"
+    edit_description = "edit_description"           # общее описание
+    edit_admin_description = "edit_adm_desc"        # приватное описание
+    rename = "rename"                               # переименовать чат
+    join = "join"
+    join_confirm = "join_confirm"
+
 
 class ChatCD(CallbackData, prefix="chat"):
     action: ChatAction
@@ -83,9 +90,10 @@ class MembersAction(str, Enum):
     freeze_confirm = "freeze_confirm"
     page = "page"
     back = "back"
-    # ── Тег/псевдоним участника ──
     edit_alias = "edit_alias"
     clear_alias = "clear_alias"
+    # ЗАДАЧА 7: привязка к компании
+    set_company = "set_company"
 
 class MembersCD(CallbackData, prefix="mbr"):
     action: MembersAction
@@ -163,9 +171,11 @@ class FiltersCD(CallbackData, prefix="flt"):
 class ViolationAction(str, Enum):
     unfreeze_member = "unfreeze_member"
     unfreeze_profile = "unfreeze_profile"
+    unfreeze_company = "unfreeze_company"   # ЗАДАЧА 7: разморозить всю компанию
 
 class ViolationCD(CallbackData, prefix="viol"):
     action: ViolationAction
     member_id: int = 0
     profile_id: int = 0
     chat_id: int = 0
+    company_id: int = 0

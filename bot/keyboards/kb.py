@@ -1,7 +1,19 @@
 import math
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from keyboards import *
 import config
+import text_templates
+
+
+# ──────────────────────────────────────────────
+#  ЗАДАЧА 2: Постоянная Reply-кнопка «Меню»
+# ──────────────────────────────────────────────
+def menu_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Постоянная клавиатура с кнопкой Меню — прикрепляется на старте."""
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text=text_templates.MENU_BUTTON_TEXT))
+    return builder.as_markup(resize_keyboard=True, persistent=True)
 
 
 # ──────────────────────────────────────────────
@@ -40,7 +52,7 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False):
     if can_create:
         builder.button(text="➕ Создать чат", callback_data=ChatsCD(action=ChatsAction.create))
 
-    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.home))
+    builder.button(text="🏠 Главное меню", callback_data=MainMenuCD(action=MainMenuAction.home))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -48,7 +60,7 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False):
 # ──────────────────────────────────────────────
 #  Детали чата
 # ──────────────────────────────────────────────
-def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool):
+def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool, is_member: bool = True):
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Написать сообщение",
                    callback_data=ChatCD(action=ChatAction.write, chat_id=chat_id))
@@ -63,13 +75,22 @@ def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: boo
                        callback_data=ChatCD(action=ChatAction.members, chat_id=chat_id))
         builder.button(text="📝 Описание чата",
                        callback_data=ChatCD(action=ChatAction.description, chat_id=chat_id))
+        builder.button(text="🚫 Фильтры чата",
+                       callback_data=ChatCD(action=ChatAction.filters, chat_id=chat_id))
+        builder.button(text="✏️ Переименовать чат",
+                       callback_data=ChatCD(action=ChatAction.rename, chat_id=chat_id))
         builder.button(text="🗑 Удалить чат",
                        callback_data=ChatCD(action=ChatAction.delete, chat_id=chat_id))
     else:
         builder.button(text="🚪 Выйти из чата",
                        callback_data=ChatCD(action=ChatAction.leave, chat_id=chat_id))
 
-    builder.button(text="⬅️ Назад", callback_data=ChatsCD(action=ChatsAction.back))
+    if is_admin_or_manager and not is_member:
+        builder.button(text="➕ Присоединиться к чату",
+                    callback_data=ChatCD(action=ChatAction.join, chat_id=chat_id))
+    
+    builder.button(text="⬅️ Назад к чатам",
+                   callback_data=ChatsCD(action=ChatsAction.back))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -91,12 +112,14 @@ def leave_confirm_keyboard(chat_id: int):
 
 
 # ──────────────────────────────────────────────
-#  Описание чата (только для админов)
+#  ЗАДАЧА 4 + 6: Описание чата (для админов)
 # ──────────────────────────────────────────────
 def chat_description_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Изменить описание",
+    builder.button(text="✏️ Изменить общее описание",
                    callback_data=ChatCD(action=ChatAction.edit_description, chat_id=chat_id))
+    builder.button(text="🔒 Изменить приватное описание",
+                   callback_data=ChatCD(action=ChatAction.edit_admin_description, chat_id=chat_id))
     builder.button(text="⬅️ Назад",
                    callback_data=ChatCD(action=ChatAction.back, chat_id=chat_id))
     builder.adjust(1)
@@ -108,6 +131,12 @@ def chat_description_keyboard(chat_id: int):
 # ──────────────────────────────────────────────
 def history_keyboard(chat_id: int, page: int, total_pages: int):
     builder = InlineKeyboardBuilder()
+
+    builder.button(
+        text="✏️ Написать сообщение",
+        callback_data=ChatCD(action=ChatAction.write_from_history, chat_id=chat_id, page=page),
+    )
+
     nav = []
     if page < total_pages - 1:
         nav.append(("⬅️ Старее", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page + 1)))
@@ -116,9 +145,13 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
         nav.append(("Новее ➡️", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page - 1)))
     for text, cd in nav:
         builder.button(text=text, callback_data=cd)
-    if len(nav) > 0:
-        builder.adjust(len(nav))
-    builder.button(text="⬅️ Назад", callback_data=ChatCD(action=ChatAction.back, chat_id=chat_id))
+    if len(nav) > 1:
+        builder.adjust(1, len(nav))
+    else:
+        builder.adjust(1)
+
+    builder.button(text="⬅️ Назад к чату",
+                   callback_data=ChatCD(action=ChatAction.back, chat_id=chat_id))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -127,7 +160,6 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
 #  Кнопки под рассылкой
 # ──────────────────────────────────────────────
 def broadcast_reply_keyboard(chat_id: int):
-    """Кнопки под входящим сообщением рассылки — быстрый ответ и история."""
     builder = InlineKeyboardBuilder()
     builder.button(
         text="✏️ Ответить в чат",
@@ -152,7 +184,6 @@ def members_list_keyboard(members: list, chat_id: int, page: int = 0):
 
     for m in page_members:
         status = "🔒" if m.is_blocked else "👤"
-        # В списке показываем display_name (с учётом alias)
         builder.button(
             text=f"{status} {m.display_name}",
             callback_data=MembersCD(action=MembersAction.select, chat_id=chat_id, member_id=m.id, page=page)
@@ -170,17 +201,12 @@ def members_list_keyboard(members: list, chat_id: int, page: int = 0):
 
 
 def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_alias: bool = False):
-    """
-    Карточка участника — только для администратора.
-    Кнопки: заморозить, редактировать тег, сбросить тег (если есть), удалить.
-    """
     builder = InlineKeyboardBuilder()
 
     freeze_text = "🔥 Разморозить" if is_blocked else "❄️ Заморозить"
     builder.button(text=freeze_text,
                    callback_data=MembersCD(action=MembersAction.freeze, chat_id=chat_id, member_id=member_id))
 
-    # Тег: кнопка редактирования всегда, кнопка сброса — только если тег задан
     alias_text = "✏️ Изменить тег" if has_alias else "🏷 Задать тег"
     builder.button(text=alias_text,
                    callback_data=MembersCD(action=MembersAction.edit_alias, chat_id=chat_id, member_id=member_id))
@@ -262,7 +288,7 @@ def staff_list_keyboard(profiles: list, page: int = 0):
 
     builder.button(text="➕ Добавить сотрудника",
                    callback_data=StaffCD(action=StaffAction.add))
-    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.chats))
+    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.home))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -317,7 +343,7 @@ def autoconnect_keyboard(auto_connects: list, profiles: list = None):
             pass
     builder.button(text="➕ Добавить автоподключение",
                    callback_data=AutoConnectCD(action=AutoConnectAction.add))
-    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.chats))
+    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.home))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -345,15 +371,6 @@ def autoconnect_delete_confirm_keyboard(ac_id: int):
 # ──────────────────────────────────────────────
 #  Фильтры
 # ──────────────────────────────────────────────
-def filters_menu_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Добавить фильтр",
-                   callback_data=FiltersCD(action=FiltersAction.create_global))
-    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.chats))
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 def global_filters_keyboard(filters: list, page: int = 0):
     builder = InlineKeyboardBuilder()
     total = len(filters)
@@ -369,7 +386,7 @@ def global_filters_keyboard(filters: list, page: int = 0):
     builder.button(text="➕ Добавить фильтр",
                    callback_data=FiltersCD(action=FiltersAction.create_global))
     builder.button(text="⬅️ Назад",
-                   callback_data=FiltersCD(action=FiltersAction.list))
+                   callback_data=MainMenuCD(action=MainMenuAction.home))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -402,7 +419,7 @@ def chat_filters_keyboard(filters: list, chat_id: int, page: int = 0):
     builder.button(text="➕ Добавить фильтр",
                    callback_data=FiltersCD(action=FiltersAction.create, chat_id=chat_id))
     builder.button(text="⬅️ Назад",
-                   callback_data=FiltersCD(action=FiltersAction.chat_list))
+                   callback_data=FiltersCD(action=FiltersAction.list))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -415,7 +432,7 @@ def chat_filter_detail_keyboard(filter_id: int, chat_id: int, is_active: bool):
     builder.button(text="🗑 Удалить",
                    callback_data=FiltersCD(action=FiltersAction.delete, filter_id=filter_id, chat_id=chat_id))
     builder.button(text="⬅️ Назад",
-                   callback_data=FiltersCD(action=FiltersAction.chat_list))
+                   callback_data=FiltersCD(action=FiltersAction.chat_list, chat_id=chat_id))
     builder.adjust(1)
     return builder.as_markup()
 
@@ -431,16 +448,43 @@ def chats_for_filter_keyboard(chats: list):
 
 
 # ──────────────────────────────────────────────
-#  Уведомление о нарушении
+#  ЗАДАЧА 7/8: Уведомление о нарушении
 # ──────────────────────────────────────────────
-def violation_keyboard(member_id: int, profile_id: int, chat_id: int):
+def violation_keyboard(member_id: int, profile_id: int, chat_id: int,
+                       company_id: int = 0, is_client: bool = False):
+    """
+    is_client=True  → нарушитель клиент (задача 7): показываем разморозку компании
+    is_client=False → нарушитель сотрудник (задача 8): показываем разморозку участника/профиля
+    """
     builder = InlineKeyboardBuilder()
-    if member_id:
-        builder.button(text="🔓 Разморозить участника",
-                       callback_data=ViolationCD(action=ViolationAction.unfreeze_member, member_id=member_id, chat_id=chat_id))
-    if profile_id:
-        builder.button(text="🔓 Разморозить профиль",
-                       callback_data=ViolationCD(action=ViolationAction.unfreeze_profile, profile_id=profile_id, chat_id=chat_id))
+    if is_client and company_id:
+        builder.button(
+            text="🔓 Разморозить компанию заказчика",
+            callback_data=ViolationCD(
+                action=ViolationAction.unfreeze_company,
+                company_id=company_id,
+                chat_id=chat_id,
+            )
+        )
+    else:
+        if member_id:
+            builder.button(
+                text="🔓 Разморозить участника",
+                callback_data=ViolationCD(
+                    action=ViolationAction.unfreeze_member,
+                    member_id=member_id,
+                    chat_id=chat_id,
+                )
+            )
+        if profile_id:
+            builder.button(
+                text="🔓 Разморозить профиль сотрудника",
+                callback_data=ViolationCD(
+                    action=ViolationAction.unfreeze_profile,
+                    profile_id=profile_id,
+                    chat_id=chat_id,
+                )
+            )
     builder.adjust(1)
     return builder.as_markup()
 

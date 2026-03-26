@@ -91,11 +91,30 @@ class Profile(BaseModel):
         return self.profile_type in (ProfileType.ADMIN, ProfileType.MANAGER)
  
  
+# -=-=- Компания (заказчик) — для группового бана -=-=-
+class Company(BaseModel):
+    """
+    Компания заказчика. Все участники одной компании банятся вместе
+    при нарушении фильтра со стороны любого из них.
+    """
+    id = peewee.AutoField(primary_key=True)
+    name = peewee.CharField(max_length=255)
+    is_blocked = peewee.BooleanField(default=False)
+    date_create = peewee.DateTimeField(default=datetime.datetime.now)
+ 
+    class Meta:
+        table_name = 'main_company'
+ 
+    def __str__(self):
+        return self.name
+ 
+ 
 # -=-=- Чат -=-=-
 class Chat(BaseModel):
     id = peewee.AutoField(primary_key=True)
     title = peewee.CharField(max_length=255)
-    description = peewee.TextField(null=True)
+    description = peewee.TextField(null=True)          # общее — видят все участники
+    admin_description = peewee.TextField(null=True)    # приватное — только для администраторов
     is_visible = peewee.BooleanField(default=True)
     is_frozen = peewee.BooleanField(default=False)
     creator_id = peewee.ForeignKeyField(Profile, null=True, backref='created_chats', on_delete='SET NULL')
@@ -129,13 +148,10 @@ class ChatMember(BaseModel):
     chat_id = peewee.ForeignKeyField(Chat, backref='members', on_delete='CASCADE')
     user_id = peewee.ForeignKeyField(UserTelegram, null=True, backref='memberships', on_delete='SET NULL')
     profile_id = peewee.ForeignKeyField(Profile, null=True, backref='memberships', on_delete='SET NULL')
+    company_id = peewee.ForeignKeyField(Company, null=True, backref='memberships', on_delete='SET NULL')
     connect_token = peewee.CharField(max_length=64, unique=True, default=lambda: secrets.token_urlsafe(32))
     member_type = peewee.CharField(max_length=50, default=MemberType.CLIENT)
     is_blocked = peewee.BooleanField(default=False)
-    # ── Тег/псевдоним участника ────────────────────────────────────────────────
-    # Задаётся только администратором чата.
-    # Используется вместо реального имени везде в рассылках и истории сообщений.
-    # Реальное имя (_real_name) видно только админу/руководителю в карточке.
     alias = peewee.CharField(max_length=100, null=True)
     date_create = peewee.DateTimeField(default=datetime.datetime.now)
  
@@ -144,20 +160,12 @@ class ChatMember(BaseModel):
  
     @property
     def display_name(self) -> str:
-        """
-        Публичное имя — то, что видят ВСЕ участники в рассылках и истории.
-        Если задан alias — используется он. Иначе — реальное имя.
-        """
         if self.alias:
             return self.alias
         return self._real_name
  
     @property
     def _real_name(self) -> str:
-        """
-        Реальное имя участника без учёта alias.
-        Показывается только администраторам в карточке участника.
-        """
         if self.profile_id:
             p = self.profile_id
             parts = []
@@ -177,6 +185,10 @@ class ChatMember(BaseModel):
     @property
     def is_admin_or_manager(self):
         return self.member_type in (MemberType.ADMIN, MemberType.MANAGER)
+ 
+    @property
+    def is_client(self):
+        return self.member_type == MemberType.CLIENT
  
  
 # -=-=- Многоразовая ссылка-приглашение в чат -=-=-

@@ -1,6 +1,5 @@
 """
 Переиспользуемые функции рендера экранов.
-Вызываются из хендлеров чтобы не дублировать логику сборки текста и клавиатуры.
 """
 import config
 import models
@@ -28,7 +27,6 @@ async def show_chats_list(
     page: int = 0,
     prefix: str = "",
 ):
-    """Список чатов. Работает и с Message (answer), и с CallbackQuery (edit_text)."""
     with models.connector:
         if is_admin_or_manager:
             chats = list(models.Chat.select().where(models.Chat.is_visible == True))
@@ -70,7 +68,6 @@ async def show_chat_detail(
     is_admin_or_manager: bool,
     prefix: str = "",
 ):
-    """Карточка чата с кнопками действий."""
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         if not chat:
@@ -92,20 +89,33 @@ async def show_chat_detail(
             if m:
                 member_is_admin = m.is_admin_or_manager
 
+    is_member = False
+    with models.connector:
+        m = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        if m:
+            is_member = True
+            member_is_admin = m.is_admin_or_manager
+
     status = "❄️ Заморожен" if chat.is_frozen else "✅ Активен"
     text = (
         f"💬 <b>{chat.title}</b>\n\n"
         f"📊 Статус: {status}\n"
         f"👥 Участников: {members_count}\n"
     )
-    # Описание чата — только для администраторов (задача 5)
-    if member_is_admin and chat.description:
+
+    if chat.description:
         text += f"\n📝 {chat.description}"
+
+    if member_is_admin and chat.admin_description:
+        text += f"\n\n🔒 <i>(Приватно)</i> {chat.admin_description}"
 
     if prefix:
         text = f"{prefix}\n\n{text}"
 
-    kb = chat_detail_keyboard(chat_id, chat.is_frozen, member_is_admin)
+    kb = chat_detail_keyboard(chat_id, chat.is_frozen, member_is_admin, is_member=is_member)
 
     msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):
@@ -124,7 +134,6 @@ async def show_members_list(
     page: int = 0,
     prefix: str = "",
 ):
-    """Список участников чата."""
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         members = list(
@@ -151,14 +160,6 @@ async def show_member_detail(
     member_id: int,
     prefix: str = "",
 ):
-    """
-    Карточка участника чата — только для администратора.
-
-    Логика отображения имён:
-    - display_name (alias или реальное) — публичное имя, то что видят все.
-    - _real_name — реальное имя из профиля/Telegram — показывается здесь рядом,
-      чтобы администратор понимал кто за каким тегом скрывается.
-    """
     with models.connector:
         member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
         if not member:
@@ -168,7 +169,7 @@ async def show_member_detail(
 
         real_name = member._real_name
         alias = member.alias
-        display = member.display_name  # alias если задан, иначе real_name
+        display = member.display_name
 
         profile_info = "—"
         if member.profile_id_id:
@@ -177,13 +178,21 @@ async def show_member_detail(
             if p.position:
                 profile_info += f", {p.position}"
 
+        # ЗАДАЧА 7: показываем компанию
+        company_info = "—"
+        if member.company_id_id:
+            try:
+                c = member.company_id
+                company_info = f"{c.name}" + (" 🔒" if c.is_blocked else "")
+            except Exception:
+                pass
+
         messages_count = models.Message.select().where(
             models.Message.member_id == member_id
         ).count()
 
     status = "🔒 Заморожен" if member.is_blocked else "✅ Активен"
 
-    # Блок имени: если тег задан — показываем оба имени админу
     if alias:
         name_block = (
             f"🏷 Тег (публичное): <b>{alias}</b>\n"
@@ -197,6 +206,7 @@ async def show_member_detail(
         f"📊 Статус: {status}\n"
         f"🏷 Роль: {member.type_label}\n"
         f"👤 Профиль: {profile_info}\n"
+        f"🏢 Компания: {company_info}\n"
         f"💬 Сообщений: {messages_count}\n"
     )
 
@@ -220,7 +230,6 @@ async def show_staff_list(
     page: int = 0,
     prefix: str = "",
 ):
-    """Список профилей сотрудников."""
     with models.connector:
         profiles = list(models.Profile.select().order_by(models.Profile.date_create))
 
@@ -248,7 +257,6 @@ async def show_staff_detail(
     profile_id: int,
     prefix: str = "",
 ):
-    """Карточка сотрудника."""
     with models.connector:
         profile = models.Profile.get_or_none(models.Profile.id == profile_id)
         if not profile:

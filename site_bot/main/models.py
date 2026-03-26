@@ -124,12 +124,32 @@ class Profile(models.Model):
     connect_link_html.short_description = "Ссылка для подключения"
 
 
+
+# -=-=- Компания (заказчик) — для группового бана -=-=-
+class Company(models.Model):
+    """
+    Компания заказчика. Все участники одной компании банятся вместе
+    при нарушении фильтра со стороны любого из них.
+    """
+    name = models.CharField(max_length=255)
+    is_blocked = models.BooleanField(default=False)
+    
+    date_create = models.DateTimeField("Дата создания", auto_now_add=True)
+ 
+    class Meta:
+        verbose_name = "Компания (заказчик)"
+        verbose_name_plural = "Компании (заказчии)"
+ 
+    def __str__(self):
+        return self.name
+
 # ══════════════════════════════════════════════
 #  Чат
 # ══════════════════════════════════════════════
 class Chat(models.Model):
     title = models.CharField("Название", max_length=255)
     description = models.TextField("Описание", null=True, blank=True)
+    admin_description = models.TextField("Описание админа", null=True, blank=True)  
     is_visible = models.BooleanField("Видимый", default=True)
     is_frozen = models.BooleanField("Заморожен", default=False)
     creator = models.ForeignKey(
@@ -198,6 +218,14 @@ class ChatMember(models.Model):
         related_name="memberships",
         on_delete=models.SET_NULL,
     )
+    company = models.ForeignKey(
+        Company, 
+        null=True, 
+        blank=True,
+        related_name='memberships', 
+        on_delete=models.SET_NULL
+    )
+
     connect_token = models.CharField(
         "Токен подключения",
         max_length=64,

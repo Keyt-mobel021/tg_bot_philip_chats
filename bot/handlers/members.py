@@ -1,7 +1,8 @@
 """
 Хендлеры: управление участниками чата.
-Включает: добавление, удаление, заморозка, многоразовые ссылки,
-          редактирование тега/псевдонима участника (только для администратора).
+ЗАДАЧА 7/8: разморозка компании заказчика.
+ЗАДАЧА 3: удаление промежуточных сообщений при вводе тега.
+ЗАДАЧА 10: исправлена кнопка «Назад».
 """
 import secrets
 from aiogram import Router, F, types
@@ -21,6 +22,7 @@ from keyboards.kb import (
     members_list_keyboard, member_detail_keyboard,
     member_freeze_confirm_keyboard, member_remove_confirm_keyboard,
     add_member_keyboard, invite_link_keyboard,
+    cancel_keyboard,
 )
 from states import MemberAliasState
 
@@ -87,7 +89,8 @@ async def cb_freeze_member_confirm(call: types.CallbackQuery, callback_data: Mem
 
     confirmed = callback_data.page == 1
     if not confirmed:
-        await call.message.delete()
+        # ЗАДАЧА 10: возвращаемся на карточку участника
+        await show_member_detail(call, callback_data.chat_id, callback_data.member_id)
         await call.answer("Отменено")
         return
 
@@ -138,7 +141,8 @@ async def cb_remove_member_confirm(call: types.CallbackQuery, callback_data: Mem
 
     confirmed = callback_data.page == 1
     if not confirmed:
-        await call.message.delete()
+        # ЗАДАЧА 10: возвращаемся на список участников
+        await show_members_list(call, callback_data.chat_id)
         await call.answer("Отменено")
         return
 
@@ -336,7 +340,7 @@ async def cb_reset_invite_link(call: types.CallbackQuery, callback_data: Members
 
 
 # ══════════════════════════════════════════════
-#  Тег/псевдоним участника (только для администратора)
+#  Тег/псевдоним участника
 # ══════════════════════════════════════════════
 
 @router.callback_query(MembersCD.filter(F.action == MembersAction.edit_alias), CheckUser())
@@ -346,7 +350,6 @@ async def cb_edit_alias_start(
     state: FSMContext,
     is_admin_or_manager: bool,
 ):
-    """Запускает FSM для ввода нового тега участника."""
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
@@ -363,15 +366,13 @@ async def cb_edit_alias_start(
         real_name = member._real_name
 
     await state.set_state(MemberAliasState.get_alias)
-    await state.update_data(member_id=member_id, chat_id=chat_id)
+    await state.update_data(member_id=member_id, chat_id=chat_id,
+                            prompt_msg_id=call.message.message_id)
 
-    from keyboards.kb import cancel_keyboard
     await call.message.edit_text(
         f"🏷 <b>Задать тег участника</b>\n\n"
         f"Участник: <b>{real_name}</b>\n"
         f"Текущий тег: <b>{current_alias}</b>\n\n"
-        f"Тег будет отображаться вместо реального имени в рассылках и истории чата.\n"
-        f"Реальное имя останется видно только вам (администратору).\n\n"
         f"Введите новый тег (или «-» чтобы очистить):",
         reply_markup=cancel_keyboard(),
         parse_mode="HTML",
@@ -381,14 +382,19 @@ async def cb_edit_alias_start(
 
 @router.message(MemberAliasState.get_alias, CheckUser())
 async def fsm_member_alias(message: types.Message, state: FSMContext):
-    """Сохраняет введённый тег."""
     data = await state.get_data()
     member_id = data["member_id"]
     chat_id = data["chat_id"]
     await state.clear()
 
     raw = message.text.strip()
-    new_alias = None if raw == "-" else raw[:100]  # ограничиваем длину полем модели
+    new_alias = None if raw == "-" else raw[:100]
+
+    # ЗАДАЧА 3: удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     with models.connector:
         member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
@@ -398,11 +404,7 @@ async def fsm_member_alias(message: types.Message, state: FSMContext):
         member.alias = new_alias
         member.save()
 
-    if new_alias:
-        prefix = f"✅ Тег <b>{new_alias}</b> сохранён."
-    else:
-        prefix = "✅ Тег сброшен. Будет использоваться реальное имя."
-
+    prefix = f"✅ Тег <b>{new_alias}</b> сохранён." if new_alias else "✅ Тег сброшен."
     await show_member_detail(message, chat_id, member_id, prefix=prefix)
 
 
@@ -412,7 +414,6 @@ async def cb_clear_alias(
     callback_data: MembersCD,
     is_admin_or_manager: bool,
 ):
-    """Мгновенно сбрасывает тег без FSM."""
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
@@ -433,10 +434,68 @@ async def cb_clear_alias(
 
 
 # ══════════════════════════════════════════════
-#  Разморозить из уведомления о нарушении
+#  ЗАДАЧА 7: Разморозить всю компанию заказчика
 # ══════════════════════════════════════════════
+
+@router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_company), CheckUser())
+async def cb_unfreeze_company(
+    call: types.CallbackQuery,
+    callback_data: ViolationCD,
+    is_admin_or_manager: bool,
+):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    company_id = callback_data.company_id
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        company = models.Company.get_or_none(models.Company.id == company_id)
+        if not company:
+            await call.answer("Компания не найдена", show_alert=True)
+            return
+        company.is_blocked = False
+        company.save()
+
+        # Разблокируем всех участников компании в данном чате
+        members_to_unfreeze = list(
+            models.ChatMember.select().where(
+                (models.ChatMember.chat_id == chat_id) &
+                (models.ChatMember.company_id == company_id)
+            )
+        )
+        models.ChatMember.update(is_blocked=False).where(
+            (models.ChatMember.chat_id == chat_id) &
+            (models.ChatMember.company_id == company_id)
+        ).execute()
+
+    # Уведомляем участников о разблокировке
+    for m in members_to_unfreeze:
+        if m.user_id_id:
+            try:
+                await call.bot.send_message(
+                    m.user_id_id,
+                    "✅ Доступ вашей компании к чату восстановлен.\n"
+                    "История переписки снова доступна.",
+                )
+            except Exception:
+                pass
+
+    await call.answer(f"✅ Компания «{company.name}» разморожена", show_alert=True)
+    await call.message.edit_reply_markup(reply_markup=None)
+
+
+# ══════════════════════════════════════════════
+#  ЗАДАЧА 7/8: Разморозить участника из уведомления
+# ══════════════════════════════════════════════
+
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_member), CheckUser())
-async def cb_unfreeze_member_from_violation(call: types.CallbackQuery, callback_data: ViolationCD, is_admin_or_manager: bool):
+async def cb_unfreeze_member_from_violation(
+    call: types.CallbackQuery,
+    callback_data: ViolationCD,
+    is_admin_or_manager: bool,
+):
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
@@ -463,7 +522,11 @@ async def cb_unfreeze_member_from_violation(call: types.CallbackQuery, callback_
 
 
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_profile), CheckUser())
-async def cb_unfreeze_profile_from_violation(call: types.CallbackQuery, callback_data: ViolationCD, is_admin_or_manager: bool):
+async def cb_unfreeze_profile_from_violation(
+    call: types.CallbackQuery,
+    callback_data: ViolationCD,
+    is_admin_or_manager: bool,
+):
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return

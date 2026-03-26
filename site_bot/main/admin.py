@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     UserTelegram, DataState,
-    Profile, Chat, ChatMember,
+    Profile, Company, Chat, ChatMember,
     Message, Attachment,
     AutoConnect, ChatFilter, GlobalFilter,
 )
@@ -56,6 +56,9 @@ class ProfileAdmin(admin.ModelAdmin):
         }),
     )
 
+@admin.register(Company)
+class CompanyAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'is_blocked', 'date_create',)
 
 # ══════════════════════════════════════════════
 #  Chat + inline участники

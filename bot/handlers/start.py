@@ -1,5 +1,5 @@
 """
-/start хендлер — точка входа, диплинки, подключение профилей и чатов.
+/start хендлер — точка входа, диплинки, Reply-кнопка меню, подключение профилей.
 """
 import datetime
 from aiogram import Router, F, types
@@ -9,15 +9,49 @@ from loguru import logger
 from filters import *
 
 import models
+import text_templates
 from keyboards import *
-from keyboards.kb import main_menu_keyboard, chat_description_keyboard, cancel_keyboard
-from states import ChatDescriptionEditState
+from keyboards.kb import (
+    main_menu_keyboard, chat_description_keyboard, cancel_keyboard,
+    menu_reply_keyboard,
+)
+from states import ChatEditState
 
 router = Router()
 
 
+# ══════════════════════════════════════════════
+#  ЗАДАЧА 2: Постоянная Reply-кнопка «Меню»
+# ══════════════════════════════════════════════
+
+@router.message(F.text == text_templates.MENU_BUTTON_TEXT, CheckUser())
+async def cmd_menu_button(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None,
+    is_admin_or_manager: bool,
+):
+    """Обрабатывает нажатие reply-кнопки Меню на ЛЮБОМ шаге."""
+    await state.clear()
+    is_adm = is_admin_or_manager or user.is_admin
+    await message.answer(
+        text_templates.MENU_REPLY_HINT,
+        reply_markup=main_menu_keyboard(is_admin_or_manager=is_adm),
+    )
+
+
+# ══════════════════════════════════════════════
+#  Кнопка «Домой» из inline-меню
+# ══════════════════════════════════════════════
+
 @router.callback_query(MainMenuCD.filter(F.action == MainMenuAction.home), CheckUser())
-async def cb_home(call: types.CallbackQuery, user: models.UserTelegram, profile: models.Profile | None, is_admin_or_manager: bool):
+async def cb_home(
+    call: types.CallbackQuery,
+    user: models.UserTelegram,
+    profile: models.Profile | None,
+    is_admin_or_manager: bool,
+):
     is_adm = is_admin_or_manager or user.is_admin
     await call.message.edit_text(
         "🏠 Главное меню. Выберите действие:",
@@ -26,9 +60,15 @@ async def cb_home(call: types.CallbackQuery, user: models.UserTelegram, profile:
     await call.answer()
 
 
+# ══════════════════════════════════════════════
+#  /start
+# ══════════════════════════════════════════════
+
 @router.message(CommandStart(), CheckUser())
 async def cmd_start(message: types.Message, state: FSMContext, user: models.UserTelegram):
+    # ЗАДАЧА 5: при /start очищаем FSM и удаляем сохранённые ID сообщений
     await state.clear()
+
     tg = message.from_user
     args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
 
@@ -51,6 +91,13 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
             profile.save()
 
         logger.info(f"Profile {profile.id} ({profile.name}) connected to user {tg.id}")
+
+        # Отправляем reply-кнопку
+        await message.answer(
+            text_templates.WELCOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=menu_reply_keyboard(),
+        )
         await message.answer(
             f"✅ Вы подключены как <b>{profile.name}</b> ({profile.type_label}).\n\n"
             f"Добро пожаловать!",
@@ -59,7 +106,7 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         )
         return
 
-    # ── ЗАДАЧА 4: Диплинк con_ — многоразовая ссылка на чат ──
+    # ── Диплинк con_ — многоразовая ссылка на чат ──
     if args.startswith("con_"):
         token = args[4:]
         with models.connector:
@@ -68,7 +115,6 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
             )
 
         if not chat_invite:
-            # Обратная совместимость: старые одноразовые ссылки на ChatMember
             with models.connector:
                 member = models.ChatMember.get_or_none(
                     models.ChatMember.connect_token == token
@@ -93,6 +139,11 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
             chat_name = chat.title if chat else "чат"
             is_adm = profile.is_admin_or_manager if profile else False
             await message.answer(
+                text_templates.WELCOME_TEXT,
+                parse_mode="HTML",
+                reply_markup=menu_reply_keyboard(),
+            )
+            await message.answer(
                 f"✅ Вы подключены к чату <b>{chat_name}</b>!\n\n"
                 f"Нажмите «Чаты» чтобы начать общение.",
                 parse_mode="HTML",
@@ -107,7 +158,6 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
                 await message.answer("❌ Чат не найден или недоступен.")
                 return
 
-            # Проверяем, не состоит ли пользователь уже в чате
             existing_member = models.ChatMember.get_or_none(
                 (models.ChatMember.chat_id == chat.id) &
                 (models.ChatMember.user_id == tg.id)
@@ -122,11 +172,9 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
                 )
                 return
 
-            # Ищем профиль пользователя
             profile = models.Profile.get_or_none(models.Profile.user_id == tg.id)
 
             if profile:
-                # Есть профиль — подключаем как сотрудника
                 member_type = models.MemberType.ADMIN if profile.is_admin_or_manager else models.MemberType.EMPLOYEE
                 models.ChatMember.create(
                     chat_id=chat.id,
@@ -136,7 +184,6 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
                 )
                 is_adm = profile.is_admin_or_manager
             else:
-                # Нет профиля — подключаем как клиента (только telegram-аккаунт)
                 models.ChatMember.create(
                     chat_id=chat.id,
                     user_id=tg.id,
@@ -147,6 +194,11 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         logger.info(f"User {tg.id} joined chat {chat.id} via multi-use invite link {token}")
 
         await message.answer(
+            text_templates.WELCOME_TEXT,
+            parse_mode="HTML",
+            reply_markup=menu_reply_keyboard(),
+        )
+        await message.answer(
             f"✅ Вы подключены к чату <b>{chat.title}</b>!\n\n"
             f"Нажмите «Чаты» чтобы начать общение.",
             parse_mode="HTML",
@@ -154,13 +206,15 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         )
         return
 
-    # ── ЗАДАЧА 2б: Диплинк media_<chat_id>_<message_id> ────
+    # ── Диплинк media_<chat_id>_<message_id> ────
     if args.startswith("media_"):
+        # Удаляем сообщение с командой /start?start=media_...
+        try: await message.delete()
+        except Exception: pass
+
         parts = args[6:].split("_", 1)
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            chat_id = int(parts[0])
             message_id = int(parts[1])
-
             from handlers.chat_messages import send_message_media
             await send_message_media(message, message_id, user)
         else:
@@ -173,10 +227,16 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
     is_adm = (profile and profile.is_admin_or_manager) or user.is_admin
 
+    # ЗАДАЧА 2: сначала welcome + reply-кнопка, потом inline меню
+    await message.answer(
+        text_templates.WELCOME_TEXT,
+        parse_mode="HTML",
+        reply_markup=menu_reply_keyboard(),
+    )
+
     greeting = f"👋 Привет, <b>{tg.first_name}</b>!\n\n"
     if profile:
         greeting += f"Вы вошли как: <b>{profile.name}</b> ({profile.type_label})\n\n"
-
     greeting += "Выберите действие:"
 
     await message.answer(
@@ -187,11 +247,67 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 5: Просмотр и редактирование описания чата (только для админов)
+#  ЗАДАЧА 4: Переименование чата
+# ══════════════════════════════════════════════
+
+@router.callback_query(ChatCD.filter(F.action == ChatAction.rename), CheckUser())
+async def cb_rename_chat(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    state: FSMContext,
+    is_admin_or_manager: bool,
+):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await state.set_state(ChatEditState.get_title)
+    await state.update_data(chat_id=callback_data.chat_id)
+    await call.message.edit_text(
+        "✏️ Введите новое название чата:",
+        reply_markup=cancel_keyboard(),
+    )
+    await call.answer()
+
+
+@router.message(ChatEditState.get_title, CheckUser())
+async def fsm_rename_chat(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = data["chat_id"]
+    new_title = message.text.strip()
+    await state.clear()
+
+    # ЗАДАЧА 3: удаляем сообщения пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if chat:
+            chat.title = new_title
+            chat.save()
+
+    from handlers import show_chat_detail
+    from models import UserTelegram
+    with models.connector:
+        user = UserTelegram.get_or_none(UserTelegram.id == message.from_user.id)
+
+    await show_chat_detail(message, chat_id, user, is_admin_or_manager=True,
+                           prefix=f"✅ Чат переименован в <b>{new_title}</b>.")
+
+
+# ══════════════════════════════════════════════
+#  ЗАДАЧА 5+6: Просмотр и редактирование описания чата
 # ══════════════════════════════════════════════
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.description), CheckUser())
-async def cb_chat_description(call: types.CallbackQuery, callback_data: ChatCD, is_admin_or_manager: bool):
+async def cb_chat_description(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    is_admin_or_manager: bool,
+):
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
@@ -204,10 +320,13 @@ async def cb_chat_description(call: types.CallbackQuery, callback_data: ChatCD, 
         await call.answer("Чат не найден", show_alert=True)
         return
 
-    desc_text = chat.description or "<i>Описание не задано</i>"
+    pub_desc = chat.description or "<i>Не задано</i>"
+    adm_desc = chat.admin_description or "<i>Не задано</i>"
+
     text = (
         f"📝 <b>Описание чата «{chat.title}»</b>\n\n"
-        f"{desc_text}"
+        f"🌐 <b>Общее</b> (видят все участники):\n{pub_desc}\n\n"
+        f"🔒 <b>Приватное</b> (только для администраторов):\n{adm_desc}"
     )
 
     await call.message.edit_text(
@@ -219,21 +338,27 @@ async def cb_chat_description(call: types.CallbackQuery, callback_data: ChatCD, 
 
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.edit_description), CheckUser())
-async def cb_edit_description_start(call: types.CallbackQuery, callback_data: ChatCD, state: FSMContext, is_admin_or_manager: bool):
+async def cb_edit_description_start(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    state: FSMContext,
+    is_admin_or_manager: bool,
+):
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
 
-    await state.set_state(ChatDescriptionEditState.get_description)
+    await state.set_state(ChatEditState.get_description)
     await state.update_data(chat_id=callback_data.chat_id)
     await call.message.edit_text(
-        "📝 Введите новое описание чата (или «-» чтобы очистить):",
+        "📝 Введите новое <b>общее</b> описание чата\n(или «-» чтобы очистить):",
         reply_markup=cancel_keyboard(),
+        parse_mode="HTML",
     )
     await call.answer()
 
 
-@router.message(ChatDescriptionEditState.get_description, CheckUser())
+@router.message(ChatEditState.get_description, CheckUser())
 async def fsm_edit_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     chat_id = data["chat_id"]
@@ -243,17 +368,84 @@ async def fsm_edit_description(message: types.Message, state: FSMContext):
     if description == "-":
         description = None
 
+    # ЗАДАЧА 3: удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         if chat:
             chat.description = description
             chat.save()
 
-    desc_text = description or "<i>Описание не задано</i>"
+    pub_desc = description or "<i>Не задано</i>"
+    with models.connector:
+        adm_desc = chat.admin_description or "<i>Не задано</i>" if chat else "<i>Не задано</i>"
+
     await message.answer(
-        f"✅ Описание обновлено.\n\n"
+        f"✅ Общее описание обновлено.\n\n"
         f"📝 <b>Описание чата «{chat.title if chat else chat_id}»</b>\n\n"
-        f"{desc_text}",
+        f"🌐 <b>Общее:</b>\n{pub_desc}\n\n"
+        f"🔒 <b>Приватное:</b>\n{adm_desc}",
+        reply_markup=chat_description_keyboard(chat_id),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(ChatCD.filter(F.action == ChatAction.edit_admin_description), CheckUser())
+async def cb_edit_admin_description_start(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    state: FSMContext,
+    is_admin_or_manager: bool,
+):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    await state.set_state(ChatEditState.get_admin_description)
+    await state.update_data(chat_id=callback_data.chat_id)
+    await call.message.edit_text(
+        "🔒 Введите <b>приватное</b> описание чата\n(или «-» чтобы очистить):",
+        reply_markup=cancel_keyboard(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.message(ChatEditState.get_admin_description, CheckUser())
+async def fsm_edit_admin_description(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = data["chat_id"]
+    await state.clear()
+
+    description = message.text.strip()
+    if description == "-":
+        description = None
+
+    # ЗАДАЧА 3: удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if chat:
+            chat.admin_description = description
+            chat.save()
+
+    adm_desc = description or "<i>Не задано</i>"
+    with models.connector:
+        pub_desc = chat.description or "<i>Не задано</i>" if chat else "<i>Не задано</i>"
+
+    await message.answer(
+        f"✅ Приватное описание обновлено.\n\n"
+        f"📝 <b>Описание чата «{chat.title if chat else chat_id}»</b>\n\n"
+        f"🌐 <b>Общее:</b>\n{pub_desc}\n\n"
+        f"🔒 <b>Приватное:</b>\n{adm_desc}",
         reply_markup=chat_description_keyboard(chat_id),
         parse_mode="HTML",
     )
@@ -262,6 +454,7 @@ async def fsm_edit_description(message: types.Message, state: FSMContext):
 # ══════════════════════════════════════════════
 #  Отмена любого FSM
 # ══════════════════════════════════════════════
+
 @router.callback_query(F.data == "cancel")
 async def cb_cancel(call: types.CallbackQuery, state: FSMContext):
     await state.clear()

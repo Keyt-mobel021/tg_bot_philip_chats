@@ -1,3 +1,6 @@
+"""
+Рассылка сообщений и уведомлений.
+"""
 import datetime
 from aiogram import Bot
 from loguru import logger
@@ -14,8 +17,6 @@ async def broadcast_message_to_chat(
 ):
     """
     Рассылает сообщение всем незамороженным участникам чата.
-    Формат: [Чат] Имя · дата/время + текст.
-    ЗАДАЧА 1: добавляем кнопки «Ответить» и «История» под каждым сообщением.
     """
     from keyboards.kb import broadcast_reply_keyboard
 
@@ -30,8 +31,6 @@ async def broadcast_message_to_chat(
 
     header = _build_header(sender_member, chat)
     full_text = f"{header}\n\n{text}" if text else header
-
-    # Клавиатура с быстрыми действиями (ответить / история)
     reply_kb = broadcast_reply_keyboard(chat.id)
 
     for member in members:
@@ -60,6 +59,84 @@ def _build_header(member: models.ChatMember, chat: models.Chat) -> str:
     return f"💬 <b>{chat.title}</b>\n👤 {name} · {now}"
 
 
+async def notify_admins_violation(
+    bot: Bot,
+    chat: models.Chat,
+    sender_member: models.ChatMember,
+    text: str,
+    is_client_violation: bool = False,
+    company_id: int = 0,
+):
+    """
+    Уведомляет администраторов и руководителей о нарушении фильтра.
+
+    ЗАДАЧА 7: is_client_violation=True — нарушитель со стороны клиента,
+              показываем кнопку разморозки всей компании.
+    ЗАДАЧА 8: is_client_violation=False — нарушитель сотрудник исполнителя,
+              показываем кнопку разморозки участника/профиля.
+    """
+    from keyboards.kb import violation_keyboard
+
+    with models.connector:
+        admin_members = list(
+            models.ChatMember.select()
+            .where(
+                (models.ChatMember.chat_id == chat.id) &
+                (models.ChatMember.member_type.in_([
+                    models.MemberType.ADMIN, models.MemberType.MANAGER,
+                ]))
+            )
+        )
+
+    profile_id = sender_member.profile_id_id or 0
+    name = sender_member.display_name
+
+    if is_client_violation:
+        ban_info = "🏢 <b>Компания заказчика заморожена</b> (все её участники в этом чате)\n"
+    else:
+        ban_info = "👤 <b>Сотрудник заморожен</b> в этом чате\n"
+
+    notify_text = (
+        f"🚨 <b>Нарушение фильтра</b>\n\n"
+        f"💬 Чат: <b>{chat.title}</b>\n"
+        f"👤 Участник: <b>{name}</b>\n"
+        f"{ban_info}"
+        f"📝 Сообщение:\n<blockquote>{text[:400]}</blockquote>"
+    )
+
+    kb = violation_keyboard(
+        member_id=sender_member.id,
+        profile_id=profile_id,
+        chat_id=chat.id,
+        company_id=company_id,
+        is_client=is_client_violation,
+    )
+
+    admin_user_ids = [m.user_id_id for m in admin_members if m.user_id_id]
+
+    if not admin_user_ids:
+        with models.connector:
+            global_admins = list(
+                models.UserTelegram.select().where(models.UserTelegram.is_admin == True)
+            )
+        admin_user_ids = [u.id for u in global_admins]
+
+    for uid in admin_user_ids:
+        try:
+            await bot.send_message(
+                chat_id=uid,
+                text=notify_text,
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.warning(f"notify_admins: failed to send to {uid}: {e}")
+
+
+# ──────────────────────────────────────────────
+#  Внутренние утилиты отправки
+# ──────────────────────────────────────────────
+
 async def _send_with_attachments(
     bot: Bot,
     user_id: int,
@@ -72,12 +149,10 @@ async def _send_with_attachments(
         InputMediaDocument, InputMediaAudio,
     )
 
-    # Одно вложение — отправляем с caption
     if len(attachments) == 1:
         await _send_single(bot, user_id, attachments[0], caption, reply_markup=reply_markup)
         return
 
-    # Медиагруппа только для фото/видео, остальное отдельно
     media_group = []
     non_media = []
 
@@ -99,7 +174,6 @@ async def _send_with_attachments(
 
     if media_group:
         sent = await bot.send_media_group(chat_id=user_id, media=media_group)
-        # Кнопки добавляем отдельным сообщением после медиагруппы
         if reply_markup and sent:
             await bot.send_message(
                 chat_id=user_id,
@@ -108,7 +182,6 @@ async def _send_with_attachments(
             )
 
     for a in non_media:
-        # caption уже ушёл с медиагруппой — не дублируем
         await _send_single(
             bot, user_id, a,
             caption if not media_group else None,
@@ -140,68 +213,8 @@ async def _send_single(
     elif t == models.AttachmentType.VOICE:
         await bot.send_voice(voice=attachment.id_file, **kwargs)
     elif t == models.AttachmentType.VIDEO_NOTE:
-        # video_note не поддерживает caption
         await bot.send_video_note(video_note=attachment.id_file, chat_id=user_id)
         if reply_markup:
             await bot.send_message(chat_id=user_id, text="👆", reply_markup=reply_markup)
     else:
         await bot.send_document(document=attachment.id_file, **kwargs)
-
-
-async def notify_admins_violation(
-    bot: Bot,
-    chat: models.Chat,
-    sender_member: models.ChatMember,
-    text: str,
-):
-    """
-    Уведомляет администраторов и руководителей чата о нарушении фильтра.
-    """
-    from keyboards.kb import violation_keyboard
-
-    with models.connector:
-        admin_members = list(
-            models.ChatMember.select()
-            .where(
-                (models.ChatMember.chat_id == chat.id) &
-                (models.ChatMember.member_type.in_([
-                    models.MemberType.ADMIN, models.MemberType.MANAGER,
-                ]))
-            )
-        )
-
-    profile_id = sender_member.profile_id_id or 0
-    name = sender_member.display_name
-
-    notify_text = (
-        f"🚨 <b>Нарушение фильтра</b>\n\n"
-        f"💬 Чат: <b>{chat.title}</b>\n"
-        f"👤 Участник: <b>{name}</b>\n"
-        f"📝 Сообщение:\n<blockquote>{text[:400]}</blockquote>"
-    )
-
-    kb = violation_keyboard(
-        member_id=sender_member.id,
-        profile_id=profile_id,
-        chat_id=chat.id,
-    )
-
-    admin_user_ids = [m.user_id_id for m in admin_members if m.user_id_id]
-
-    if not admin_user_ids:
-        with models.connector:
-            global_admins = list(
-                models.UserTelegram.select().where(models.UserTelegram.is_admin == True)
-            )
-        admin_user_ids = [u.id for u in global_admins]
-
-    for uid in admin_user_ids:
-        try:
-            await bot.send_message(
-                chat_id=uid,
-                text=notify_text,
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            logger.warning(f"notify_admins: failed to send to {uid}: {e}")
