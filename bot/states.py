@@ -7,7 +7,7 @@ class ChatCreateState(StatesGroup):
     get_description = State()
  
  
-# -=-=- ЗАДАЧА 5: Редактирование описания чата -=-=-
+# -=-=- Редактирование описания чата (только для админов) -=-=-
 class ChatDescriptionEditState(StatesGroup):
     get_description = State()
  
@@ -37,6 +37,11 @@ class FilterCreateState(StatesGroup):
  
 class FilterEditState(StatesGroup):
     get_pattern = State()
+ 
+ 
+# -=-=- Тег/псевдоним участника чата -=-=-
+class MemberAliasState(StatesGroup):
+    get_alias = State()
  
  
 # -=-=- Подтверждения -=-=-

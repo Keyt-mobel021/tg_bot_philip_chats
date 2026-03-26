@@ -2,10 +2,6 @@ from aiogram.filters.callback_data import CallbackData
 from enum import Enum
 
 
-from aiogram.filters.callback_data import CallbackData
-from enum import Enum
-
-
 # ══════════════════════════════════════════════
 #  Главное меню
 # ══════════════════════════════════════════════
@@ -49,7 +45,6 @@ class ChatAction(str, Enum):
     back = "back"
     delete = "delete"
     delete_confirm = "delete_confirm"
-    # ЗАДАЧА 5: просмотр и редактирование описания (только для админов)
     description = "description"
     edit_description = "edit_description"
 
@@ -81,12 +76,16 @@ class MembersAction(str, Enum):
     add = "add"
     add_profile = "add_profile"
     invite_link = "invite_link"
+    reset_invite = "reset_invite"
     remove = "remove"
     remove_confirm = "remove_confirm"
     freeze = "freeze"
     freeze_confirm = "freeze_confirm"
     page = "page"
     back = "back"
+    # ── Тег/псевдоним участника ──
+    edit_alias = "edit_alias"
+    clear_alias = "clear_alias"
 
 class MembersCD(CallbackData, prefix="mbr"):
     action: MembersAction
@@ -159,7 +158,7 @@ class FiltersCD(CallbackData, prefix="flt"):
 
 
 # ══════════════════════════════════════════════
-#  Уведомления о нарушениях (для администраторов)
+#  Уведомления о нарушениях
 # ══════════════════════════════════════════════
 class ViolationAction(str, Enum):
     unfreeze_member = "unfreeze_member"

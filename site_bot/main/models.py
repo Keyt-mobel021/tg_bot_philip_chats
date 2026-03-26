@@ -211,6 +211,8 @@ class ChatMember(models.Model):
         default=MEMBER_TYPE_CLIENT,
     )
     is_blocked = models.BooleanField("Заморожен", default=False)
+    
+    alias = models.CharField("Тег участника", max_length=100, null=True, blank=True)
     date_create = models.DateTimeField("Дата создания", auto_now_add=True)
 
     class Meta:

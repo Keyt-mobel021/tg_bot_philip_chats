@@ -1,9 +1,11 @@
 """
 Хендлеры: управление участниками чата.
-ЗАДАЧА 4: многоразовые ссылки-приглашения через модель ChatInviteLink.
+Включает: добавление, удаление, заморозка, многоразовые ссылки,
+          редактирование тега/псевдонима участника (только для администратора).
 """
 import secrets
 from aiogram import Router, F, types
+from aiogram.fsm.context import FSMContext
 from loguru import logger
 
 import models
@@ -18,8 +20,9 @@ from . import *
 from keyboards.kb import (
     members_list_keyboard, member_detail_keyboard,
     member_freeze_confirm_keyboard, member_remove_confirm_keyboard,
-    add_member_keyboard,
+    add_member_keyboard, invite_link_keyboard,
 )
+from states import MemberAliasState
 
 router = Router()
 
@@ -34,7 +37,6 @@ async def cb_members_list(call: types.CallbackQuery, callback_data, is_admin_or_
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
-
     await show_members_list(call, callback_data.chat_id, page=getattr(callback_data, 'page', 0))
     await call.answer()
 
@@ -47,7 +49,6 @@ async def cb_member_detail(call: types.CallbackQuery, callback_data: MembersCD, 
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
-
     await show_member_detail(call, callback_data.chat_id, callback_data.member_id)
     await call.answer()
 
@@ -155,10 +156,9 @@ async def cb_remove_member_confirm(call: types.CallbackQuery, callback_data: Mem
         try:
             with models.connector:
                 chat = models.Chat.get_or_none(models.Chat.id == chat_id)
-                chat_name = chat.title if chat else str(chat_id)
             await call.bot.send_message(
                 user_tg_id,
-                f"ℹ️ Вы были удалены из чата <b>{chat_name}</b>.",
+                f"ℹ️ Вы были удалены из чата <b>{chat.title if chat else chat_id}</b>.",
                 parse_mode="HTML",
             )
         except Exception:
@@ -194,18 +194,13 @@ async def cb_add_member(call: types.CallbackQuery, callback_data: MembersCD, is_
                 (models.ChatMember.user_id.is_null(False))
             )
         ]
-
         profiles = list(
             models.Profile.select().where(
                 models.Profile.id.not_in(existing_profile_ids) if existing_profile_ids
                 else models.Profile.id.is_null(False)
             )
         )
-
-        profile_user_ids = [
-            p.user_id_id for p in models.Profile.select()
-            if p.user_id_id is not None
-        ]
+        profile_user_ids = [p.user_id_id for p in models.Profile.select() if p.user_id_id]
         all_exclude_user_ids = list(set(profile_user_ids + existing_user_ids))
         tg_users = list(
             models.UserTelegram.select().where(
@@ -269,7 +264,7 @@ async def cb_add_profile_to_chat(call: types.CallbackQuery, callback_data: Membe
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 4: Пригласить по многоразовой ссылке
+#  Многоразовая ссылка-приглашение
 # ══════════════════════════════════════════════
 @router.callback_query(MembersCD.filter(F.action == MembersAction.invite_link), CheckUser())
 async def cb_invite_link(call: types.CallbackQuery, callback_data: MembersCD, is_admin_or_manager: bool):
@@ -285,18 +280,14 @@ async def cb_invite_link(call: types.CallbackQuery, callback_data: MembersCD, is
             await call.answer("Чат не найден", show_alert=True)
             return
 
-        # Ищем существующую активную многоразовую ссылку для этого чата
         invite = models.ChatInviteLink.get_or_none(
             (models.ChatInviteLink.chat_id == chat_id) &
             (models.ChatInviteLink.is_active == True)
         )
-
         if not invite:
-            # Создаём новую многоразовую ссылку
-            token = secrets.token_urlsafe(16)
             invite = models.ChatInviteLink.create(
                 chat_id=chat_id,
-                token=token,
+                token=secrets.token_urlsafe(16),
             )
 
     link = f"https://t.me/{config.BOT_USERNAME}?start=con_{invite.token}"
@@ -308,33 +299,14 @@ async def cb_invite_link(call: types.CallbackQuery, callback_data: MembersCD, is
         f"<code>{link}</code>\n\n"
         f"ℹ️ Если у пользователя есть профиль сотрудника — он подключится как сотрудник.\n"
         f"Если нет — как клиент.",
-        reply_markup=invite_link_keyboard(chat_id, invite.token),
+        reply_markup=invite_link_keyboard(chat_id),
         parse_mode="HTML",
     )
     await call.answer()
 
 
-def invite_link_keyboard(chat_id: int, token: str):
-    """Клавиатура для управления многоразовой ссылкой."""
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    from keyboards import MembersCD, MembersAction
-
-    builder = InlineKeyboardBuilder()
-    builder.button(
-        text="🔄 Сбросить ссылку",
-        callback_data=MembersCD(action=MembersAction.reset_invite, chat_id=chat_id)
-    )
-    builder.button(
-        text="⬅️ Назад",
-        callback_data=MembersCD(action=MembersAction.list, chat_id=chat_id)
-    )
-    builder.adjust(1)
-    return builder.as_markup()
-
-
 @router.callback_query(MembersCD.filter(F.action == MembersAction.reset_invite), CheckUser())
 async def cb_reset_invite_link(call: types.CallbackQuery, callback_data: MembersCD, is_admin_or_manager: bool):
-    """Сбрасывает текущую ссылку и создаёт новую."""
     if not is_admin_or_manager:
         await call.answer("Недостаточно прав", show_alert=True)
         return
@@ -342,16 +314,12 @@ async def cb_reset_invite_link(call: types.CallbackQuery, callback_data: Members
     chat_id = callback_data.chat_id
 
     with models.connector:
-        # Деактивируем старые ссылки
         models.ChatInviteLink.update(is_active=False).where(
             models.ChatInviteLink.chat_id == chat_id
         ).execute()
-
-        # Создаём новую
-        token = secrets.token_urlsafe(16)
         invite = models.ChatInviteLink.create(
             chat_id=chat_id,
-            token=token,
+            token=secrets.token_urlsafe(16),
         )
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
 
@@ -361,9 +329,106 @@ async def cb_reset_invite_link(call: types.CallbackQuery, callback_data: Members
         f"✅ Ссылка обновлена.\n\n"
         f"🔗 <b>Новая ссылка для чата «{chat.title if chat else chat_id}»</b>\n\n"
         f"<code>{link}</code>",
-        reply_markup=invite_link_keyboard(chat_id, invite.token),
+        reply_markup=invite_link_keyboard(chat_id),
         parse_mode="HTML",
     )
+    await call.answer()
+
+
+# ══════════════════════════════════════════════
+#  Тег/псевдоним участника (только для администратора)
+# ══════════════════════════════════════════════
+
+@router.callback_query(MembersCD.filter(F.action == MembersAction.edit_alias), CheckUser())
+async def cb_edit_alias_start(
+    call: types.CallbackQuery,
+    callback_data: MembersCD,
+    state: FSMContext,
+    is_admin_or_manager: bool,
+):
+    """Запускает FSM для ввода нового тега участника."""
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    member_id = callback_data.member_id
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
+        if not member:
+            await call.answer("Участник не найден", show_alert=True)
+            return
+        current_alias = member.alias or "—"
+        real_name = member._real_name
+
+    await state.set_state(MemberAliasState.get_alias)
+    await state.update_data(member_id=member_id, chat_id=chat_id)
+
+    from keyboards.kb import cancel_keyboard
+    await call.message.edit_text(
+        f"🏷 <b>Задать тег участника</b>\n\n"
+        f"Участник: <b>{real_name}</b>\n"
+        f"Текущий тег: <b>{current_alias}</b>\n\n"
+        f"Тег будет отображаться вместо реального имени в рассылках и истории чата.\n"
+        f"Реальное имя останется видно только вам (администратору).\n\n"
+        f"Введите новый тег (или «-» чтобы очистить):",
+        reply_markup=cancel_keyboard(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.message(MemberAliasState.get_alias, CheckUser())
+async def fsm_member_alias(message: types.Message, state: FSMContext):
+    """Сохраняет введённый тег."""
+    data = await state.get_data()
+    member_id = data["member_id"]
+    chat_id = data["chat_id"]
+    await state.clear()
+
+    raw = message.text.strip()
+    new_alias = None if raw == "-" else raw[:100]  # ограничиваем длину полем модели
+
+    with models.connector:
+        member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
+        if not member:
+            await message.answer("❌ Участник не найден.")
+            return
+        member.alias = new_alias
+        member.save()
+
+    if new_alias:
+        prefix = f"✅ Тег <b>{new_alias}</b> сохранён."
+    else:
+        prefix = "✅ Тег сброшен. Будет использоваться реальное имя."
+
+    await show_member_detail(message, chat_id, member_id, prefix=prefix)
+
+
+@router.callback_query(MembersCD.filter(F.action == MembersAction.clear_alias), CheckUser())
+async def cb_clear_alias(
+    call: types.CallbackQuery,
+    callback_data: MembersCD,
+    is_admin_or_manager: bool,
+):
+    """Мгновенно сбрасывает тег без FSM."""
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    member_id = callback_data.member_id
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
+        if not member:
+            await call.answer("Участник не найден", show_alert=True)
+            return
+        member.alias = None
+        member.save()
+
+    await show_member_detail(call, chat_id, member_id, prefix="✅ Тег сброшен.")
     await call.answer()
 
 
@@ -389,10 +454,7 @@ async def cb_unfreeze_member_from_violation(call: types.CallbackQuery, callback_
 
     if user_tg_id:
         try:
-            await call.bot.send_message(
-                user_tg_id,
-                "✅ Ваш доступ к чату восстановлен.",
-            )
+            await call.bot.send_message(user_tg_id, "✅ Ваш доступ к чату восстановлен.")
         except Exception:
             pass
 

@@ -132,13 +132,32 @@ class ChatMember(BaseModel):
     connect_token = peewee.CharField(max_length=64, unique=True, default=lambda: secrets.token_urlsafe(32))
     member_type = peewee.CharField(max_length=50, default=MemberType.CLIENT)
     is_blocked = peewee.BooleanField(default=False)
+    # ── Тег/псевдоним участника ────────────────────────────────────────────────
+    # Задаётся только администратором чата.
+    # Используется вместо реального имени везде в рассылках и истории сообщений.
+    # Реальное имя (_real_name) видно только админу/руководителю в карточке.
+    alias = peewee.CharField(max_length=100, null=True)
     date_create = peewee.DateTimeField(default=datetime.datetime.now)
  
     class Meta:
         table_name = 'main_chatmember'
  
     @property
-    def display_name(self):
+    def display_name(self) -> str:
+        """
+        Публичное имя — то, что видят ВСЕ участники в рассылках и истории.
+        Если задан alias — используется он. Иначе — реальное имя.
+        """
+        if self.alias:
+            return self.alias
+        return self._real_name
+ 
+    @property
+    def _real_name(self) -> str:
+        """
+        Реальное имя участника без учёта alias.
+        Показывается только администраторам в карточке участника.
+        """
         if self.profile_id:
             p = self.profile_id
             parts = []
@@ -160,13 +179,8 @@ class ChatMember(BaseModel):
         return self.member_type in (MemberType.ADMIN, MemberType.MANAGER)
  
  
-# -=-=- ЗАДАЧА 4: Многоразовая ссылка-приглашение в чат -=-=-
+# -=-=- Многоразовая ссылка-приглашение в чат -=-=-
 class ChatInviteLink(BaseModel):
-    """
-    Многоразовая ссылка для вступления в чат.
-    В отличие от ChatMember.connect_token (одноразовый), эта ссылка
-    может использоваться неограниченное кол-во раз.
-    """
     id = peewee.AutoField(primary_key=True)
     chat_id = peewee.ForeignKeyField(Chat, backref='invite_links', on_delete='CASCADE')
     token = peewee.CharField(max_length=64, unique=True)

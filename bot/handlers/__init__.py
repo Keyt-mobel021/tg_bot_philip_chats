@@ -98,7 +98,8 @@ async def show_chat_detail(
         f"📊 Статус: {status}\n"
         f"👥 Участников: {members_count}\n"
     )
-    if chat.description:
+    # Описание чата — только для администраторов (задача 5)
+    if member_is_admin and chat.description:
         text += f"\n📝 {chat.description}"
 
     if prefix:
@@ -150,7 +151,14 @@ async def show_member_detail(
     member_id: int,
     prefix: str = "",
 ):
-    """Карточка участника чата."""
+    """
+    Карточка участника чата — только для администратора.
+
+    Логика отображения имён:
+    - display_name (alias или реальное) — публичное имя, то что видят все.
+    - _real_name — реальное имя из профиля/Telegram — показывается здесь рядом,
+      чтобы администратор понимал кто за каким тегом скрывается.
+    """
     with models.connector:
         member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
         if not member:
@@ -158,7 +166,10 @@ async def show_member_detail(
             await _msg.answer("Участник не найден.")
             return
 
-        name = member.display_name
+        real_name = member._real_name
+        alias = member.alias
+        display = member.display_name  # alias если задан, иначе real_name
+
         profile_info = "—"
         if member.profile_id_id:
             p = member.profile_id
@@ -171,17 +182,28 @@ async def show_member_detail(
         ).count()
 
     status = "🔒 Заморожен" if member.is_blocked else "✅ Активен"
+
+    # Блок имени: если тег задан — показываем оба имени админу
+    if alias:
+        name_block = (
+            f"🏷 Тег (публичное): <b>{alias}</b>\n"
+            f"👤 Реальное имя: {real_name}\n"
+        )
+    else:
+        name_block = f"👤 <b>{real_name}</b>\n"
+
     text = (
-        f"👤 <b>{name}</b>\n\n"
+        f"{name_block}\n"
         f"📊 Статус: {status}\n"
-        f"🏷 Тип: {member.type_label}\n"
+        f"🏷 Роль: {member.type_label}\n"
         f"👤 Профиль: {profile_info}\n"
         f"💬 Сообщений: {messages_count}\n"
     )
+
     if prefix:
         text = f"{prefix}\n\n{text}"
 
-    kb = member_detail_keyboard(chat_id, member_id, member.is_blocked)
+    kb = member_detail_keyboard(chat_id, member_id, member.is_blocked, has_alias=bool(alias))
     msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):
         await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
