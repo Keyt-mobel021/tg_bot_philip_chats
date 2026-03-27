@@ -52,6 +52,38 @@ class DataState(peewee.Model):
 
 
 
+# -=-=- Тексты бота (правила, приветствия и т.п.) -=-=-
+class BotTextType(str):
+    RULES = 'rules'
+    # Можно добавлять другие типы по мере необходимости
+ 
+BOT_TEXT_TYPES = [BotTextType.RULES]
+BOT_TEXT_TYPE_LABELS = {
+    BotTextType.RULES: 'Правила',
+}
+ 
+ 
+class BotText(BaseModel):
+    """
+    Динамические тексты бота (правила, welcome и т.п.).
+    Тип text_type определяет назначение текста.
+    При первом /start ищется текст с типом 'rules'.
+    """
+    id = peewee.AutoField(primary_key=True)
+    text_type = peewee.CharField(max_length=50, default=BotTextType.RULES)
+    title = peewee.CharField(max_length=255)       # ориентировочный заголовок (для администратора)
+    content = peewee.TextField()                   # сам текст (HTML)
+    is_active = peewee.BooleanField(default=True)
+    date_create = peewee.DateTimeField(default=datetime.datetime.now)
+    date_update = peewee.DateTimeField(default=datetime.datetime.now)
+ 
+    class Meta:
+        table_name = 'main_bottext'
+ 
+    def __str__(self):
+        return self.title
+ 
+ 
 # -=-=- Профиль (системная роль компании) -=-=-
 class ProfileType(str):
     ADMIN = 'admin'
@@ -93,10 +125,6 @@ class Profile(BaseModel):
  
 # -=-=- Компания (заказчик) — для группового бана -=-=-
 class Company(BaseModel):
-    """
-    Компания заказчика. Все участники одной компании банятся вместе
-    при нарушении фильтра со стороны любого из них.
-    """
     id = peewee.AutoField(primary_key=True)
     name = peewee.CharField(max_length=255)
     is_blocked = peewee.BooleanField(default=False)
@@ -113,8 +141,8 @@ class Company(BaseModel):
 class Chat(BaseModel):
     id = peewee.AutoField(primary_key=True)
     title = peewee.CharField(max_length=255)
-    description = peewee.TextField(null=True)          # общее — видят все участники
-    admin_description = peewee.TextField(null=True)    # приватное — только для администраторов
+    description = peewee.TextField(null=True)
+    admin_description = peewee.TextField(null=True)
     is_visible = peewee.BooleanField(default=True)
     is_frozen = peewee.BooleanField(default=False)
     creator_id = peewee.ForeignKeyField(Profile, null=True, backref='created_chats', on_delete='SET NULL')
@@ -243,6 +271,26 @@ class Attachment(BaseModel):
         table_name = 'main_attachment'
  
  
+# -=-=- Прочитанные сообщения (для системы непрочитанных) -=-=-
+class MessageRead(BaseModel):
+    """
+    Хранит последнее прочитанное сообщение для каждого участника чата.
+    Чтение засчитывается при открытии истории.
+    """
+    id = peewee.AutoField(primary_key=True)
+    member_id = peewee.ForeignKeyField(ChatMember, backref='read_marks', on_delete='CASCADE')
+    # ID последнего прочитанного сообщения в этом чате
+    last_read_message_id = peewee.IntegerField(default=0)
+    date_read = peewee.DateTimeField(default=datetime.datetime.now)
+ 
+    class Meta:
+        table_name = 'main_messageread'
+        # Уникальная пара: один участник — одна запись о прочтении
+        indexes = (
+            (('member_id',), True),
+        )
+ 
+ 
 # -=-=- Автоподключение -=-=-
 class AutoConnect(BaseModel):
     id = peewee.AutoField(primary_key=True)
@@ -280,3 +328,14 @@ class GlobalFilter(BaseModel):
  
     class Meta:
         table_name = 'main_globalfilter'
+ 
+ 
+# -=-=- Утилита: создать таблицы если не существуют -=-=-
+def create_tables():
+    """Вызвать один раз при старте бота для создания новых таблиц."""
+    with connector:
+        connector.create_tables([
+            UserTelegram, DataState, BotText, Profile, Company, Chat,
+            ChatMember, ChatInviteLink, Message, Attachment,
+            MessageRead, AutoConnect, ChatFilter, GlobalFilter,
+        ], safe=True)

@@ -5,14 +5,15 @@ from aiogram.fsm.state import State, StatesGroup
 class ChatCreateState(StatesGroup):
     get_title = State()
     get_description = State()
+    get_admin_description = State()   # Задача 8: приватное описание при создании
     get_filters = State()
 
 
 # -=-=- Редактирование чата (только для админов) -=-=-
 class ChatEditState(StatesGroup):
-    get_title = State()             # ЗАДАЧА 4: переименование чата
-    get_description = State()       # общее описание
-    get_admin_description = State() # ЗАДАЧА 6: приватное описание
+    get_title = State()
+    get_description = State()
+    get_admin_description = State()
 
 
 # -=-=- Создание/редактирование профиля сотрудника -=-=-

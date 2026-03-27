@@ -1,5 +1,7 @@
 """
 /start хендлер — точка входа, диплинки, Reply-кнопка меню, подключение профилей.
+Задача 3: welcome text из базы данных (модель BotText, тип 'rules'),
+          fallback на text_templates.WELCOME_TEXT.
 """
 import datetime
 from aiogram import Router, F, types
@@ -20,8 +22,26 @@ from states import ChatEditState
 router = Router()
 
 
+def _get_welcome_text() -> str:
+    """
+    Задача 3: возвращает текст правил из БД (модель BotText, тип 'rules').
+    Если записи нет — возвращает базовый WELCOME_TEXT из text_templates.
+    """
+    try:
+        with models.connector:
+            bot_text = models.BotText.get_or_none(
+                (models.BotText.text_type == models.BotTextType.RULES) &
+                (models.BotText.is_active == True)
+            )
+        if bot_text:
+            return bot_text.content
+    except Exception as e:
+        logger.warning(f"_get_welcome_text: {e}")
+    return text_templates.WELCOME_TEXT
+
+
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 2: Постоянная Reply-кнопка «Меню»
+#  Постоянная Reply-кнопка «Меню»
 # ══════════════════════════════════════════════
 
 @router.message(F.text == text_templates.MENU_BUTTON_TEXT, CheckUser())
@@ -32,7 +52,6 @@ async def cmd_menu_button(
     profile: models.Profile | None,
     is_admin_or_manager: bool,
 ):
-    """Обрабатывает нажатие reply-кнопки Меню на ЛЮБОМ шаге."""
     await state.clear()
     is_adm = is_admin_or_manager or user.is_admin
     await message.answer(
@@ -66,11 +85,12 @@ async def cb_home(
 
 @router.message(CommandStart(), CheckUser())
 async def cmd_start(message: types.Message, state: FSMContext, user: models.UserTelegram):
-    # ЗАДАЧА 5: при /start очищаем FSM и удаляем сохранённые ID сообщений
     await state.clear()
 
     tg = message.from_user
     args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
+
+    welcome_text = _get_welcome_text()
 
     # ── Диплинк: подключить профиль сотрудника ──────────────
     if args.startswith("pe_"):
@@ -92,9 +112,8 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
         logger.info(f"Profile {profile.id} ({profile.name}) connected to user {tg.id}")
 
-        # Отправляем reply-кнопку
         await message.answer(
-            text_templates.WELCOME_TEXT,
+            welcome_text,
             parse_mode="HTML",
             reply_markup=menu_reply_keyboard(),
         )
@@ -139,7 +158,7 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
             chat_name = chat.title if chat else "чат"
             is_adm = profile.is_admin_or_manager if profile else False
             await message.answer(
-                text_templates.WELCOME_TEXT,
+                welcome_text,
                 parse_mode="HTML",
                 reply_markup=menu_reply_keyboard(),
             )
@@ -194,7 +213,7 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         logger.info(f"User {tg.id} joined chat {chat.id} via multi-use invite link {token}")
 
         await message.answer(
-            text_templates.WELCOME_TEXT,
+            welcome_text,
             parse_mode="HTML",
             reply_markup=menu_reply_keyboard(),
         )
@@ -208,9 +227,10 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
     # ── Диплинк media_<chat_id>_<message_id> ────
     if args.startswith("media_"):
-        # Удаляем сообщение с командой /start?start=media_...
-        try: await message.delete()
-        except Exception: pass
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
         parts = args[6:].split("_", 1)
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
@@ -227,14 +247,13 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
     is_adm = (profile and profile.is_admin_or_manager) or user.is_admin
 
-    # ЗАДАЧА 2: сначала welcome + reply-кнопка, потом inline меню
     await message.answer(
-        text_templates.WELCOME_TEXT,
+        welcome_text,
         parse_mode="HTML",
         reply_markup=menu_reply_keyboard(),
     )
 
-    greeting = f"👋 Привет, <b>{tg.first_name}</b>!\n\n"
+    greeting = f"👋 Привет, <b>{tg.full_name or 'пользователь'}</b>!\n\n"
     if profile:
         greeting += f"Вы вошли как: <b>{profile.name}</b> ({profile.type_label})\n\n"
     greeting += "Выберите действие:"
@@ -247,7 +266,7 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 4: Переименование чата
+#  Переименование чата
 # ══════════════════════════════════════════════
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.rename), CheckUser())
@@ -277,7 +296,6 @@ async def fsm_rename_chat(message: types.Message, state: FSMContext):
     new_title = message.text.strip()
     await state.clear()
 
-    # ЗАДАЧА 3: удаляем сообщения пользователя
     try:
         await message.delete()
     except Exception:
@@ -299,7 +317,7 @@ async def fsm_rename_chat(message: types.Message, state: FSMContext):
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 5+6: Просмотр и редактирование описания чата
+#  Просмотр и редактирование описания чата
 # ══════════════════════════════════════════════
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.description), CheckUser())
@@ -368,7 +386,6 @@ async def fsm_edit_description(message: types.Message, state: FSMContext):
     if description == "-":
         description = None
 
-    # ЗАДАЧА 3: удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
@@ -382,7 +399,7 @@ async def fsm_edit_description(message: types.Message, state: FSMContext):
 
     pub_desc = description or "<i>Не задано</i>"
     with models.connector:
-        adm_desc = chat.admin_description or "<i>Не задано</i>" if chat else "<i>Не задано</i>"
+        adm_desc = (chat.admin_description or "<i>Не задано</i>") if chat else "<i>Не задано</i>"
 
     await message.answer(
         f"✅ Общее описание обновлено.\n\n"
@@ -425,7 +442,6 @@ async def fsm_edit_admin_description(message: types.Message, state: FSMContext):
     if description == "-":
         description = None
 
-    # ЗАДАЧА 3: удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
@@ -439,7 +455,7 @@ async def fsm_edit_admin_description(message: types.Message, state: FSMContext):
 
     adm_desc = description or "<i>Не задано</i>"
     with models.connector:
-        pub_desc = chat.description or "<i>Не задано</i>" if chat else "<i>Не задано</i>"
+        pub_desc = (chat.description or "<i>Не задано</i>") if chat else "<i>Не задано</i>"
 
     await message.answer(
         f"✅ Приватное описание обновлено.\n\n"

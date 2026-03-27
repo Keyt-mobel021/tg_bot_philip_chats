@@ -244,11 +244,23 @@ async def cb_add_profile_to_chat(call: types.CallbackQuery, callback_data: Membe
             return
 
         member_type = models.MemberType.ADMIN if profile.is_admin_or_manager else models.MemberType.EMPLOYEE
-        models.ChatMember.create(
+        new_member = models.ChatMember.create(
             chat_id=chat_id,
             user_id=profile.user_id_id,
             profile_id=profile_id,
             member_type=member_type,
+        )
+
+        last_msg = (
+            models.Message.select()
+            .join(models.ChatMember)
+            .where(models.ChatMember.chat_id == chat_id)
+            .order_by(models.Message.date_create.desc())
+            .first()
+        )
+        models.MessageRead.create(
+            member=new_member,
+            last_read_message_id=last_msg.id if last_msg else 0,
         )
 
     if profile.user_id_id:

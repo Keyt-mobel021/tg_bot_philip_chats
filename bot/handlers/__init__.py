@@ -1,5 +1,7 @@
 """
 Переиспользуемые функции рендера экранов.
+Задача 11: счётчик непрочитанных в списке чатов.
+Задача 4: МСК часовой пояс.
 """
 import config
 import models
@@ -14,6 +16,18 @@ from keyboards.kb import (
     staff_detail_keyboard,
     history_keyboard,
 )
+
+
+def _msk_dt(dt) -> str:
+    """Форматирует datetime в строку МСК."""
+    if dt is None:
+        return "—"
+    if dt.tzinfo is None:
+        import pytz
+        dt = pytz.utc.localize(dt).astimezone(config.TIMEZONE)
+    else:
+        dt = dt.astimezone(config.TIMEZONE)
+    return dt.strftime("%d.%m.%Y %H:%M")
 
 
 # ══════════════════════════════════════════════
@@ -42,6 +56,33 @@ async def show_chats_list(
                 (models.Chat.id.in_(chat_ids)) & (models.Chat.is_visible == True)
             )) if chat_ids else []
 
+        # Задача 11: собираем непрочитанные для каждого чата
+        member_map: dict[int, models.ChatMember] = {}
+        read_map: dict[int, int] = {}  # member_id -> last_read_message_id
+        unread_map: dict[int, int] = {}  # chat_id -> unread count
+
+        for chat in chats:
+            m = models.ChatMember.get_or_none(
+                (models.ChatMember.user_id == user.id) &
+                (models.ChatMember.chat_id == chat.id)
+            )
+            if m:
+                member_map[chat.id] = m
+                read_mark = models.MessageRead.get_or_none(
+                    models.MessageRead.member_id == m.id
+                )
+                last_read = read_mark.last_read_message_id if read_mark else 0
+                unread = (
+                    models.Message.select()
+                    .join(models.ChatMember)
+                    .where(
+                        (models.ChatMember.chat_id == chat.id) &
+                        (models.Message.id > last_read)
+                    )
+                    .count()
+                )
+                unread_map[chat.id] = unread
+
     if not chats:
         text = "💬 Чатов пока нет."
         if is_admin_or_manager:
@@ -52,7 +93,8 @@ async def show_chats_list(
     if prefix:
         text = f"{prefix}\n\n{text}"
 
-    kb = chats_list_keyboard(chats, page=page, can_create=is_admin_or_manager)
+    kb = chats_list_keyboard(chats, page=page, can_create=is_admin_or_manager,
+                             unread_map=unread_map)
 
     msg = target if isinstance(target, types.Message) else target.message
     if isinstance(target, types.CallbackQuery):
@@ -80,14 +122,6 @@ async def show_chat_detail(
         ).count()
 
     member_is_admin = is_admin_or_manager
-    if not is_admin_or_manager:
-        with models.connector:
-            m = models.ChatMember.get_or_none(
-                (models.ChatMember.user_id == user.id) &
-                (models.ChatMember.chat_id == chat_id)
-            )
-            if m:
-                member_is_admin = m.is_admin_or_manager
 
     is_member = False
     with models.connector:
@@ -98,6 +132,10 @@ async def show_chat_detail(
         if m:
             is_member = True
             member_is_admin = m.is_admin_or_manager
+
+    # Если is_admin_or_manager по профилю — оставляем True
+    if is_admin_or_manager:
+        member_is_admin = True
 
     status = "❄️ Заморожен" if chat.is_frozen else "✅ Активен"
     text = (
@@ -178,7 +216,6 @@ async def show_member_detail(
             if p.position:
                 profile_info += f", {p.position}"
 
-        # ЗАДАЧА 7: показываем компанию
         company_info = "—"
         if member.company_id_id:
             try:

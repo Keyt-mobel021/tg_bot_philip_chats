@@ -7,10 +7,9 @@ import text_templates
 
 
 # ──────────────────────────────────────────────
-#  ЗАДАЧА 2: Постоянная Reply-кнопка «Меню»
+#  Постоянная Reply-кнопка «Меню»
 # ──────────────────────────────────────────────
 def menu_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Постоянная клавиатура с кнопкой Меню — прикрепляется на старте."""
     builder = ReplyKeyboardBuilder()
     builder.add(KeyboardButton(text=text_templates.MENU_BUTTON_TEXT))
     return builder.as_markup(resize_keyboard=True, persistent=True)
@@ -32,17 +31,23 @@ def main_menu_keyboard(is_admin_or_manager: bool = False):
 
 # ──────────────────────────────────────────────
 #  Список чатов
+#  Задача 11: принимает unread_map {chat_id: unread_count}
 # ──────────────────────────────────────────────
-def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False):
+def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
+                        unread_map: dict | None = None):
     builder = InlineKeyboardBuilder()
+    unread_map = unread_map or {}
     total = len(chats)
     total_pages = max(1, math.ceil(total / config.PAGE_SIZE))
     page_chats = chats[page * config.PAGE_SIZE:(page + 1) * config.PAGE_SIZE]
 
     for chat in page_chats:
         status = "❄️" if chat.is_frozen else "💬"
+        unread = unread_map.get(chat.id, 0)
+        # Задача 11: показываем счётчик непрочитанных
+        unread_badge = f" (🔴{unread})" if unread > 0 else ""
         builder.button(
-            text=f"{status} {chat.title}",
+            text=f"{status} {unread_badge} {chat.title}",
             callback_data=ChatsCD(action=ChatsAction.select, chat_id=chat.id, page=page)
         )
 
@@ -88,7 +93,7 @@ def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: boo
     if is_admin_or_manager and not is_member:
         builder.button(text="➕ Присоединиться к чату",
                     callback_data=ChatCD(action=ChatAction.join, chat_id=chat_id))
-    
+
     builder.button(text="⬅️ Назад к чатам",
                    callback_data=ChatsCD(action=ChatsAction.back))
     builder.adjust(1)
@@ -112,7 +117,7 @@ def leave_confirm_keyboard(chat_id: int):
 
 
 # ──────────────────────────────────────────────
-#  ЗАДАЧА 4 + 6: Описание чата (для админов)
+#  Описание чата
 # ──────────────────────────────────────────────
 def chat_description_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
@@ -128,16 +133,20 @@ def chat_description_keyboard(chat_id: int):
 
 # ──────────────────────────────────────────────
 #  История сообщений
+#  Задача 5: страницы — page=0 самая новая, page=N-1 самая старая
 # ──────────────────────────────────────────────
 def history_keyboard(chat_id: int, page: int, total_pages: int):
     builder = InlineKeyboardBuilder()
 
+    # Задача 1: кнопка «Ответить в чат» ведёт через write_from_history,
+    # чтобы провалиться сразу в ввод сообщения с видимой историей выше
     builder.button(
         text="✏️ Написать сообщение",
         callback_data=ChatCD(action=ChatAction.write_from_history, chat_id=chat_id, page=page),
     )
 
     nav = []
+    # page=0 — самые новые. «Старее» = page+1, «Новее» = page-1
     if page < total_pages - 1:
         nav.append(("⬅️ Старее", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page + 1)))
     nav.append((f"стр. {page + 1}/{total_pages}", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page)))
@@ -151,19 +160,21 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
         builder.adjust(1)
 
     builder.button(text="⬅️ Назад к чату",
-                   callback_data=ChatCD(action=ChatAction.back, chat_id=chat_id))
+                   callback_data=ChatsCD(action=ChatsAction.select, chat_id=chat_id))
     builder.adjust(1)
     return builder.as_markup()
 
 
 # ──────────────────────────────────────────────
-#  Кнопки под рассылкой
+#  Кнопки под рассылкой (Задача 1 — «Ответить» ведёт через write_from_history)
 # ──────────────────────────────────────────────
 def broadcast_reply_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
+    # Задача 1: кнопка «Ответить в чат» теперь через write_from_history —
+    # пользователь нажимает, бот сразу запрашивает сообщение, без лишних шагов.
     builder.button(
         text="✏️ Ответить в чат",
-        callback_data=ChatCD(action=ChatAction.write, chat_id=chat_id)
+        callback_data=ChatCD(action=ChatAction.write_from_history, chat_id=chat_id, page=0)
     )
     builder.button(
         text="📋 История сообщений",
@@ -202,18 +213,16 @@ def members_list_keyboard(members: list, chat_id: int, page: int = 0):
 
 def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_alias: bool = False):
     builder = InlineKeyboardBuilder()
-
     freeze_text = "🔥 Разморозить" if is_blocked else "❄️ Заморозить"
     builder.button(text=freeze_text,
                    callback_data=MembersCD(action=MembersAction.freeze, chat_id=chat_id, member_id=member_id))
-
-    alias_text = "✏️ Изменить тег" if has_alias else "🏷 Задать тег"
-    builder.button(text=alias_text,
+    builder.button(text="🏷 Задать тег",
                    callback_data=MembersCD(action=MembersAction.edit_alias, chat_id=chat_id, member_id=member_id))
     if has_alias:
         builder.button(text="❌ Сбросить тег",
                        callback_data=MembersCD(action=MembersAction.clear_alias, chat_id=chat_id, member_id=member_id))
-
+    builder.button(text="🏢 Привязать к компании",
+                   callback_data=MembersCD(action=MembersAction.set_company, chat_id=chat_id, member_id=member_id))
     builder.button(text="🗑 Удалить из чата",
                    callback_data=MembersCD(action=MembersAction.remove, chat_id=chat_id, member_id=member_id))
     builder.button(text="⬅️ Назад",
@@ -223,32 +232,39 @@ def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_a
 
 
 def member_freeze_confirm_keyboard(chat_id: int, member_id: int, is_blocked: bool):
+    action_text = "Разморозить" if is_blocked else "Заморозить"
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да",
-                   callback_data=MembersCD(action=MembersAction.freeze_confirm, chat_id=chat_id, member_id=member_id, page=1))
+    builder.button(text=f"✅ Да, {action_text.lower()}",
+                   callback_data=MembersCD(action=MembersAction.freeze_confirm,
+                                           chat_id=chat_id, member_id=member_id, page=1))
     builder.button(text="❌ Нет",
-                   callback_data=MembersCD(action=MembersAction.freeze_confirm, chat_id=chat_id, member_id=member_id, page=0))
+                   callback_data=MembersCD(action=MembersAction.freeze_confirm,
+                                           chat_id=chat_id, member_id=member_id, page=0))
     builder.adjust(2)
     return builder.as_markup()
 
 
 def member_remove_confirm_keyboard(chat_id: int, member_id: int):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да",
-                   callback_data=MembersCD(action=MembersAction.remove_confirm, chat_id=chat_id, member_id=member_id, page=1))
+    builder.button(text="✅ Да, удалить",
+                   callback_data=MembersCD(action=MembersAction.remove_confirm,
+                                           chat_id=chat_id, member_id=member_id, page=1))
     builder.button(text="❌ Нет",
-                   callback_data=MembersCD(action=MembersAction.remove_confirm, chat_id=chat_id, member_id=member_id, page=0))
+                   callback_data=MembersCD(action=MembersAction.remove_confirm,
+                                           chat_id=chat_id, member_id=member_id, page=0))
     builder.adjust(2)
     return builder.as_markup()
 
 
-def add_member_keyboard(chat_id: int, profiles: list, users: list):
+def add_member_keyboard(chat_id: int, profiles: list, tg_users: list):
     builder = InlineKeyboardBuilder()
-    builder.button(text="🔗 Пригласить по ссылке",
-                   callback_data=MembersCD(action=MembersAction.invite_link, chat_id=chat_id))
-    for p in profiles:
+    builder.button(
+        text="🔗 Пригласить по ссылке",
+        callback_data=MembersCD(action=MembersAction.invite_link, chat_id=chat_id)
+    )
+    for p in profiles[:20]:
         builder.button(
-            text=f"👤 {p.name}" + (f" ({p.position})" if p.position else ""),
+            text=f"👤 {p.name}",
             callback_data=MembersCD(action=MembersAction.add_profile, chat_id=chat_id, profile_id=p.id)
         )
     builder.button(text="⬅️ Назад",
@@ -277,29 +293,30 @@ def staff_list_keyboard(profiles: list, page: int = 0):
     page_profiles = profiles[page * config.PAGE_SIZE:(page + 1) * config.PAGE_SIZE]
 
     for p in page_profiles:
-        icon = "🔒" if p.is_blocked else "👤"
+        status = "🔒" if p.is_blocked else "👤"
         builder.button(
-            text=f"{icon} {p.name}",
+            text=f"{status} {p.name} ({p.type_label})",
             callback_data=StaffCD(action=StaffAction.select, profile_id=p.id, page=page)
         )
 
     _add_pagination(builder, total_pages, page,
-                    lambda p_: StaffCD(action=StaffAction.page, page=p_))
+                    lambda p: StaffCD(action=StaffAction.page, page=p))
 
     builder.button(text="➕ Добавить сотрудника",
                    callback_data=StaffCD(action=StaffAction.add))
-    builder.button(text="⬅️ Назад", callback_data=MainMenuCD(action=MainMenuAction.home))
+    builder.button(text="⬅️ Главное меню",
+                   callback_data=MainMenuCD(action=MainMenuAction.home))
     builder.adjust(1)
     return builder.as_markup()
 
 
 def staff_detail_keyboard(profile_id: int):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Редактировать имя",
+    builder.button(text="✏️ Изменить имя",
                    callback_data=StaffCD(action=StaffAction.edit_name, profile_id=profile_id))
-    builder.button(text="✏️ Редактировать должность",
+    builder.button(text="💼 Изменить должность",
                    callback_data=StaffCD(action=StaffAction.edit_position, profile_id=profile_id))
-    builder.button(text="🗑 Удалить сотрудника",
+    builder.button(text="🗑 Удалить",
                    callback_data=StaffCD(action=StaffAction.delete, profile_id=profile_id))
     builder.button(text="⬅️ Назад",
                    callback_data=StaffCD(action=StaffAction.list))
@@ -309,7 +326,7 @@ def staff_detail_keyboard(profile_id: int):
 
 def staff_delete_confirm_keyboard(profile_id: int):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Да",
+    builder.button(text="✅ Да, удалить",
                    callback_data=StaffCD(action=StaffAction.delete_confirm, profile_id=profile_id, page=1))
     builder.button(text="❌ Нет",
                    callback_data=StaffCD(action=StaffAction.delete_confirm, profile_id=profile_id, page=0))
@@ -318,11 +335,11 @@ def staff_delete_confirm_keyboard(profile_id: int):
 
 
 def profile_type_keyboard():
-    from models import PROFILE_TYPES, PROFILE_TYPE_LABELS
+    from keyboards import StaffCD, StaffAction
     builder = InlineKeyboardBuilder()
-    for pt in PROFILE_TYPES:
-        builder.button(text=PROFILE_TYPE_LABELS[pt], callback_data=f"ptype:{pt}")
-    builder.button(text="❌ Отмена", callback_data="cancel")
+    builder.button(text="👑 Администратор", callback_data="ptype:admin")
+    builder.button(text="🗂 Руководитель", callback_data="ptype:manager")
+    builder.button(text="👷 Сотрудник", callback_data="ptype:employee")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -330,7 +347,7 @@ def profile_type_keyboard():
 # ──────────────────────────────────────────────
 #  Автоподключение
 # ──────────────────────────────────────────────
-def autoconnect_keyboard(auto_connects: list, profiles: list = None):
+def autoconnect_keyboard(auto_connects: list):
     builder = InlineKeyboardBuilder()
     for ac in auto_connects:
         try:
@@ -448,14 +465,10 @@ def chats_for_filter_keyboard(chats: list):
 
 
 # ──────────────────────────────────────────────
-#  ЗАДАЧА 7/8: Уведомление о нарушении
+#  Уведомление о нарушении
 # ──────────────────────────────────────────────
 def violation_keyboard(member_id: int, profile_id: int, chat_id: int,
                        company_id: int = 0, is_client: bool = False):
-    """
-    is_client=True  → нарушитель клиент (задача 7): показываем разморозку компании
-    is_client=False → нарушитель сотрудник (задача 8): показываем разморозку участника/профиля
-    """
     builder = InlineKeyboardBuilder()
     if is_client and company_id:
         builder.button(
