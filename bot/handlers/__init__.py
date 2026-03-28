@@ -2,6 +2,7 @@
 Переиспользуемые функции рендера экранов.
 Задача 11: счётчик непрочитанных в списке чатов.
 Задача 4: МСК часовой пояс.
+Задача 1 (новая): пользователь заморожен хотя бы в одном чате — не видит список чатов.
 """
 import config
 import models
@@ -30,6 +31,31 @@ def _msk_dt(dt) -> str:
     return dt.strftime("%d.%m.%Y %H:%M")
 
 
+def _user_is_frozen_anywhere(user: models.UserTelegram) -> bool:
+    """
+    ЗАДАЧА 1: Проверяет, заморожен ли пользователь хотя бы в одном чате.
+    Если да — он не должен видеть список чатов и не может в них зайти.
+    Администраторы и руководители не подпадают под эту проверку.
+    """
+    with models.connector:
+        # Проверяем есть ли профиль админа/руководителя
+        profile = models.Profile.get_or_none(
+            models.Profile.user_id == user.id
+        )
+        if profile and profile.is_admin_or_manager:
+            return False
+
+        frozen_count = (
+            models.ChatMember.select()
+            .where(
+                (models.ChatMember.user_id == user.id) &
+                (models.ChatMember.is_blocked == True)
+            )
+            .count()
+        )
+    return frozen_count > 0
+
+
 # ══════════════════════════════════════════════
 #  Чаты
 # ══════════════════════════════════════════════
@@ -41,6 +67,20 @@ async def show_chats_list(
     page: int = 0,
     prefix: str = "",
 ):
+    # ЗАДАЧА 1: если пользователь заморожен хотя бы в одном чате — блокируем доступ
+    if not is_admin_or_manager and _user_is_frozen_anywhere(user):
+        text = (
+            "❄️ <b>Доступ ограничен</b>\n\n"
+            "Один из ваших чатов временно заморожен, идёт разбирательство.\n"
+            "Обратитесь к администратору для получения информации."
+        )
+        msg = target if isinstance(target, types.Message) else target.message
+        if isinstance(target, types.CallbackQuery):
+            await msg.edit_text(text, parse_mode="HTML")
+        else:
+            await msg.answer(text, parse_mode="HTML")
+        return
+
     with models.connector:
         if is_admin_or_manager:
             chats = list(models.Chat.select().where(models.Chat.is_visible == True))
@@ -110,6 +150,20 @@ async def show_chat_detail(
     is_admin_or_manager: bool,
     prefix: str = "",
 ):
+    # ЗАДАЧА 1: если пользователь заморожен — блокируем доступ к деталям чата
+    if not is_admin_or_manager and _user_is_frozen_anywhere(user):
+        text = (
+            "❄️ <b>Доступ ограничен</b>\n\n"
+            "Один из ваших чатов временно заморожен, идёт разбирательство.\n"
+            "Обратитесь к администратору для получения информации."
+        )
+        msg = target.message if isinstance(target, types.CallbackQuery) else target
+        if isinstance(target, types.CallbackQuery):
+            await msg.edit_text(text, parse_mode="HTML")
+        else:
+            await msg.answer(text, parse_mode="HTML")
+        return
+
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         if not chat:
@@ -138,11 +192,16 @@ async def show_chat_detail(
         member_is_admin = True
 
     status = "❄️ Заморожен" if chat.is_frozen else "✅ Активен"
+    # ЗАДАЧА 5/6: показываем режим компании
+    cmode = "🏢 Вкл" if chat.company_mode else "👤 Выкл"
     text = (
         f"💬 <b>{chat.title}</b>\n\n"
         f"📊 Статус: {status}\n"
         f"👥 Участников: {members_count}\n"
     )
+
+    if member_is_admin:
+        text += f"🏢 Режим компании: {cmode}\n"
 
     if chat.description:
         text += f"\n📝 {chat.description}"
@@ -153,7 +212,8 @@ async def show_chat_detail(
     if prefix:
         text = f"{prefix}\n\n{text}"
 
-    kb = chat_detail_keyboard(chat_id, chat.is_frozen, member_is_admin, is_member=is_member)
+    kb = chat_detail_keyboard(chat_id, chat.is_frozen, member_is_admin,
+                              is_member=is_member, company_mode=chat.company_mode)
 
     msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):

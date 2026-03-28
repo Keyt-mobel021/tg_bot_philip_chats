@@ -64,8 +64,10 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
 
 # ──────────────────────────────────────────────
 #  Детали чата
+#  ЗАДАЧА 6: добавлена кнопка переключения режима компании
 # ──────────────────────────────────────────────
-def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool, is_member: bool = True):
+def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool,
+                         is_member: bool = True, company_mode: bool = True):
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Написать сообщение",
                    callback_data=ChatCD(action=ChatAction.write, chat_id=chat_id))
@@ -84,6 +86,10 @@ def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: boo
                        callback_data=ChatCD(action=ChatAction.filters, chat_id=chat_id))
         builder.button(text="✏️ Переименовать чат",
                        callback_data=ChatCD(action=ChatAction.rename, chat_id=chat_id))
+        # ЗАДАЧА 6: кнопка переключения режима компании
+        cmode_text = "🏢 Режим компании: ВКЛ" if company_mode else "👤 Режим компании: ВЫКЛ"
+        builder.button(text=cmode_text,
+                       callback_data=ChatCD(action=ChatAction.toggle_company_mode, chat_id=chat_id))
         builder.button(text="🗑 Удалить чат",
                        callback_data=ChatCD(action=ChatAction.delete, chat_id=chat_id))
     else:
@@ -133,20 +139,16 @@ def chat_description_keyboard(chat_id: int):
 
 # ──────────────────────────────────────────────
 #  История сообщений
-#  Задача 5: страницы — page=0 самая новая, page=N-1 самая старая
 # ──────────────────────────────────────────────
 def history_keyboard(chat_id: int, page: int, total_pages: int):
     builder = InlineKeyboardBuilder()
 
-    # Задача 1: кнопка «Ответить в чат» ведёт через write_from_history,
-    # чтобы провалиться сразу в ввод сообщения с видимой историей выше
     builder.button(
         text="✏️ Написать сообщение",
         callback_data=ChatCD(action=ChatAction.write_from_history, chat_id=chat_id, page=page),
     )
 
     nav = []
-    # page=0 — самые новые. «Старее» = page+1, «Новее» = page-1
     if page < total_pages - 1:
         nav.append(("⬅️ Старее", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page + 1)))
     nav.append((f"стр. {page + 1}/{total_pages}", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page)))
@@ -166,12 +168,10 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
 
 
 # ──────────────────────────────────────────────
-#  Кнопки под рассылкой (Задача 1 — «Ответить» ведёт через write_from_history)
+#  Кнопки под рассылкой (Задача 2: reply на сообщение от бота)
 # ──────────────────────────────────────────────
 def broadcast_reply_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
-    # Задача 1: кнопка «Ответить в чат» теперь через write_from_history —
-    # пользователь нажимает, бот сразу запрашивает сообщение, без лишних шагов.
     builder.button(
         text="✏️ Ответить в чат",
         callback_data=ChatCD(action=ChatAction.write_from_history, chat_id=chat_id, page=0)
@@ -211,6 +211,7 @@ def members_list_keyboard(members: list, chat_id: int, page: int = 0):
     return builder.as_markup()
 
 
+# ЗАДАЧА 4: убрана кнопка «Привязать к компании»
 def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_alias: bool = False):
     builder = InlineKeyboardBuilder()
     freeze_text = "🔥 Разморозить" if is_blocked else "❄️ Заморозить"
@@ -221,8 +222,7 @@ def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_a
     if has_alias:
         builder.button(text="❌ Сбросить тег",
                        callback_data=MembersCD(action=MembersAction.clear_alias, chat_id=chat_id, member_id=member_id))
-    builder.button(text="🏢 Привязать к компании",
-                   callback_data=MembersCD(action=MembersAction.set_company, chat_id=chat_id, member_id=member_id))
+    # ЗАДАЧА 4: кнопка «Привязать к компании» УБРАНА
     builder.button(text="🗑 Удалить из чата",
                    callback_data=MembersCD(action=MembersAction.remove, chat_id=chat_id, member_id=member_id))
     builder.button(text="⬅️ Назад",
@@ -466,11 +466,22 @@ def chats_for_filter_keyboard(chats: list):
 
 # ──────────────────────────────────────────────
 #  Уведомление о нарушении
+#  ЗАДАЧА 5: поддержка разморозки всех клиентов (режим компании)
 # ──────────────────────────────────────────────
 def violation_keyboard(member_id: int, profile_id: int, chat_id: int,
-                       company_id: int = 0, is_client: bool = False):
+                       company_id: int = 0, is_client: bool = False,
+                       is_company_mode: bool = False):
     builder = InlineKeyboardBuilder()
-    if is_client and company_id:
+    if is_client and is_company_mode:
+        # Режим компании: морозили всех клиентов — кнопка разморозки всех
+        builder.button(
+            text="🔓 Разморозить всех клиентов чата",
+            callback_data=ViolationCD(
+                action=ViolationAction.unfreeze_all_clients,
+                chat_id=chat_id,
+            )
+        )
+    elif is_client and company_id:
         builder.button(
             text="🔓 Разморозить компанию заказчика",
             callback_data=ViolationCD(

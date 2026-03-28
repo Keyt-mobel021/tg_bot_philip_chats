@@ -1,8 +1,7 @@
 """
 Хендлеры: управление участниками чата.
-ЗАДАЧА 7/8: разморозка компании заказчика.
-ЗАДАЧА 3: удаление промежуточных сообщений при вводе тега.
-ЗАДАЧА 10: исправлена кнопка «Назад».
+ЗАДАЧА 5: разморозка всех клиентов чата (режим компании).
+ЗАДАЧА 4: убрана привязка к компании.
 """
 import secrets
 from aiogram import Router, F, types
@@ -89,7 +88,6 @@ async def cb_freeze_member_confirm(call: types.CallbackQuery, callback_data: Mem
 
     confirmed = callback_data.page == 1
     if not confirmed:
-        # ЗАДАЧА 10: возвращаемся на карточку участника
         await show_member_detail(call, callback_data.chat_id, callback_data.member_id)
         await call.answer("Отменено")
         return
@@ -141,7 +139,6 @@ async def cb_remove_member_confirm(call: types.CallbackQuery, callback_data: Mem
 
     confirmed = callback_data.page == 1
     if not confirmed:
-        # ЗАДАЧА 10: возвращаемся на список участников
         await show_members_list(call, callback_data.chat_id)
         await call.answer("Отменено")
         return
@@ -402,7 +399,6 @@ async def fsm_member_alias(message: types.Message, state: FSMContext):
     raw = message.text.strip()
     new_alias = None if raw == "-" else raw[:100]
 
-    # ЗАДАЧА 3: удаляем сообщение пользователя
     try:
         await message.delete()
     except Exception:
@@ -446,7 +442,7 @@ async def cb_clear_alias(
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 7: Разморозить всю компанию заказчика
+#  Разморозить всю компанию заказчика
 # ══════════════════════════════════════════════
 
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_company), CheckUser())
@@ -470,7 +466,6 @@ async def cb_unfreeze_company(
         company.is_blocked = False
         company.save()
 
-        # Разблокируем всех участников компании в данном чате
         members_to_unfreeze = list(
             models.ChatMember.select().where(
                 (models.ChatMember.chat_id == chat_id) &
@@ -482,14 +477,13 @@ async def cb_unfreeze_company(
             (models.ChatMember.company_id == company_id)
         ).execute()
 
-    # Уведомляем участников о разблокировке
     for m in members_to_unfreeze:
         if m.user_id_id:
             try:
                 await call.bot.send_message(
                     m.user_id_id,
-                    "✅ Доступ вашей компании к чату восстановлен.\n"
-                    "История переписки снова доступна.",
+                    "✅ Доступ к чату восстановлен.\n"
+                    "Вы снова можете просматривать чаты и писать сообщения.",
                 )
             except Exception:
                 pass
@@ -499,7 +493,51 @@ async def cb_unfreeze_company(
 
 
 # ══════════════════════════════════════════════
-#  ЗАДАЧА 7/8: Разморозить участника из уведомления
+#  ЗАДАЧА 5: Разморозить всех клиентов чата (режим компании)
+# ══════════════════════════════════════════════
+
+@router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_all_clients), CheckUser())
+async def cb_unfreeze_all_clients(
+    call: types.CallbackQuery,
+    callback_data: ViolationCD,
+    is_admin_or_manager: bool,
+):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        frozen_clients = list(
+            models.ChatMember.select().where(
+                (models.ChatMember.chat_id == chat_id) &
+                (models.ChatMember.member_type == models.MemberType.CLIENT) &
+                (models.ChatMember.is_blocked == True)
+            )
+        )
+        models.ChatMember.update(is_blocked=False).where(
+            (models.ChatMember.chat_id == chat_id) &
+            (models.ChatMember.member_type == models.MemberType.CLIENT)
+        ).execute()
+
+    for m in frozen_clients:
+        if m.user_id_id:
+            try:
+                await call.bot.send_message(
+                    m.user_id_id,
+                    "✅ Доступ к чату восстановлен.\n"
+                    "Вы снова можете просматривать чаты и писать сообщения.",
+                )
+            except Exception:
+                pass
+
+    await call.answer(f"✅ Все клиенты чата разморожены ({len(frozen_clients)})", show_alert=True)
+    await call.message.edit_reply_markup(reply_markup=None)
+
+
+# ══════════════════════════════════════════════
+#  Разморозить участника из уведомления
 # ══════════════════════════════════════════════
 
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_member), CheckUser())
@@ -525,7 +563,11 @@ async def cb_unfreeze_member_from_violation(
 
     if user_tg_id:
         try:
-            await call.bot.send_message(user_tg_id, "✅ Ваш доступ к чату восстановлен.")
+            await call.bot.send_message(
+                user_tg_id,
+                "✅ Доступ к чату восстановлен.\n"
+                "Вы снова можете просматривать чаты и писать сообщения.",
+            )
         except Exception:
             pass
 

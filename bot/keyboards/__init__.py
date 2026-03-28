@@ -53,6 +53,8 @@ class ChatAction(str, Enum):
     rename = "rename"                               # переименовать чат
     join = "join"
     join_confirm = "join_confirm"
+    # ЗАДАЧА 5/6: переключение режима компании
+    toggle_company_mode = "tog_cmode"
 
 
 class ChatCD(CallbackData, prefix="chat"):
@@ -92,8 +94,6 @@ class MembersAction(str, Enum):
     back = "back"
     edit_alias = "edit_alias"
     clear_alias = "clear_alias"
-    # ЗАДАЧА 7: привязка к компании
-    set_company = "set_company"
 
 class MembersCD(CallbackData, prefix="mbr"):
     action: MembersAction
@@ -171,7 +171,9 @@ class FiltersCD(CallbackData, prefix="flt"):
 class ViolationAction(str, Enum):
     unfreeze_member = "unfreeze_member"
     unfreeze_profile = "unfreeze_profile"
-    unfreeze_company = "unfreeze_company"   # ЗАДАЧА 7: разморозить всю компанию
+    unfreeze_company = "unfreeze_company"
+    # ЗАДАЧА 5: разморозить всех клиентов чата (режим компании)
+    unfreeze_all_clients = "unfreeze_clients"
 
 class ViolationCD(CallbackData, prefix="viol"):
     action: ViolationAction

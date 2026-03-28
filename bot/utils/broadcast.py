@@ -66,14 +66,12 @@ async def notify_admins_violation(
     text: str,
     is_client_violation: bool = False,
     company_id: int = 0,
+    is_company_mode: bool = False,
 ):
     """
     Уведомляет администраторов и руководителей о нарушении фильтра.
 
-    ЗАДАЧА 7: is_client_violation=True — нарушитель со стороны клиента,
-              показываем кнопку разморозки всей компании.
-    ЗАДАЧА 8: is_client_violation=False — нарушитель сотрудник исполнителя,
-              показываем кнопку разморозки участника/профиля.
+    ЗАДАЧА 5: is_company_mode=True — морозим всех клиентов в чате.
     """
     from keyboards.kb import violation_keyboard
 
@@ -91,8 +89,12 @@ async def notify_admins_violation(
     profile_id = sender_member.profile_id_id or 0
     name = sender_member.display_name
 
-    if is_client_violation:
+    if is_client_violation and is_company_mode:
+        ban_info = "🏢 <b>Все клиенты чата заморожены</b> (режим компании)\n"
+    elif is_client_violation and company_id:
         ban_info = "🏢 <b>Компания заказчика заморожена</b> (все её участники в этом чате)\n"
+    elif is_client_violation:
+        ban_info = "👤 <b>Клиент заморожен</b> в этом чате\n"
     else:
         ban_info = "👤 <b>Сотрудник заморожен</b> в этом чате\n"
 
@@ -110,6 +112,7 @@ async def notify_admins_violation(
         chat_id=chat.id,
         company_id=company_id,
         is_client=is_client_violation,
+        is_company_mode=is_company_mode,
     )
 
     admin_user_ids = [m.user_id_id for m in admin_members if m.user_id_id]

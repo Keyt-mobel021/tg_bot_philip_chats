@@ -212,6 +212,7 @@ class Chat(models.Model):
     )
     is_visible = models.BooleanField("Видимый", default=True)
     is_frozen = models.BooleanField("Заморожен", default=False)
+    company_mode = models.BooleanField("Режим компании", default=True)
     creator = models.ForeignKey(
         Profile,
         verbose_name="Создатель",

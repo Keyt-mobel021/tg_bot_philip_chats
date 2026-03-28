@@ -1,8 +1,10 @@
 """
 Хендлеры: написать сообщение в чат + посмотреть историю.
 Задача 1: при написании из истории — история остаётся видна, потом удаляется.
+Задача 2 (новая): reply на сообщение от бота = ответ в чат.
 Задача 4: часовой пояс МСК.
-Задача 5: порядок сообщений — старые вверху, новые внизу на каждой странице.
+Задача 5 (новая): режим компании — при нарушении морозим всех клиентов.
+Задача 7 (новая): пишем «чат заморожен» вместо «вы заморожены».
 Задача 11: система непрочитанных сообщений.
 """
 from aiogram import Router, F, types
@@ -56,8 +58,6 @@ async def cb_write_message(
 
 # ══════════════════════════════════════════════
 #  Задача 1: Написать из истории / ответить на рассылку
-#  — история остаётся выше, ждём сообщение,
-#    затем удаляем историю + запрос, показываем подтверждение + новую историю
 # ══════════════════════════════════════════════
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.write_from_history), CheckUser())
@@ -106,7 +106,7 @@ async def _start_write(
         return
 
     if member.is_blocked:
-        await call.answer("🔒 Вы заморожены в этом чате", show_alert=True)
+        await call.answer("❄️ Чат временно заморожен", show_alert=True)
         return
 
     await state.set_state(SendMessageState.get_message)
@@ -142,6 +142,85 @@ async def _start_write(
         )
         await state.update_data(prompt_msg_id=call.message.message_id)
         await call.answer()
+
+
+# ══════════════════════════════════════════════
+#  ЗАДАЧА 2: Reply на сообщение от бота = ответ в чат
+#  Если пользователь делает reply на сообщение бота,
+#  у которого есть inline-кнопки с chat_id, бот
+#  распознаёт это как сообщение в соответствующий чат.
+# ══════════════════════════════════════════════
+
+@router.message(F.reply_to_message, CheckUser())
+async def handle_reply_to_bot(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    """
+    Ловим reply на сообщение бота. Пытаемся определить chat_id
+    из inline-кнопок оригинального сообщения.
+    """
+    reply = message.reply_to_message
+    if not reply:
+        return
+
+    # Проверяем что это сообщение от бота (а не от другого пользователя)
+    if not reply.from_user or not reply.from_user.is_bot:
+        return
+
+    # Ищем chat_id в inline-кнопках оригинального сообщения
+    chat_id = _extract_chat_id_from_markup(reply.reply_markup)
+    if not chat_id:
+        return
+
+    # Проверяем текущее состояние FSM — если уже в каком-то FSM, не перехватываем
+    current_state = await state.get_state()
+    if current_state is not None:
+        return
+
+    # Далее обрабатываем как обычное сообщение в чат
+    text = message.text or message.caption or ""
+
+    await _process_and_send(
+        message=message,
+        state=state,
+        user=user,
+        chat_id=chat_id,
+        text=text,
+        raw_messages=[message],
+        from_history=False,
+        history_page=0,
+        history_msg_id=None,
+        prompt_msg_id=None,
+    )
+
+
+def _extract_chat_id_from_markup(markup) -> int | None:
+    """
+    Извлекает chat_id из inline-клавиатуры сообщения бота.
+    Ищет callback_data, содержащий chat_id в формате ChatCD.
+    """
+    if not markup or not hasattr(markup, 'inline_keyboard'):
+        return None
+
+    for row in markup.inline_keyboard:
+        for button in row:
+            if not button.callback_data:
+                continue
+            cb_data = button.callback_data
+            # Ищем callback_data вида "chat:...:chat_id:NNN:..."
+            # ChatCD prefix = "chat", формат: chat:action:chat_id:page
+            if cb_data.startswith("chat:"):
+                try:
+                    parsed = ChatCD.unpack(cb_data)
+                    if parsed.chat_id:
+                        return parsed.chat_id
+                except Exception:
+                    pass
+    return None
 
 
 # ══════════════════════════════════════════════
@@ -274,6 +353,12 @@ async def _process_and_send(
             await message.answer("Вы не участник этого чата.")
             return
 
+        # ЗАДАЧА 1: проверка заморозки
+        if member.is_blocked:
+            from text_templates import CHAT_FROZEN_VIOLATION_TEXT
+            await message.answer(CHAT_FROZEN_VIOLATION_TEXT)
+            return
+
         chat_filters = list(models.ChatFilter.select().where(
             (models.ChatFilter.chat_id == chat_id) &
             (models.ChatFilter.is_active == True)
@@ -287,9 +372,18 @@ async def _process_and_send(
         with models.connector:
             is_client = member.is_client
             company_id = member.company_id_id or 0
+            is_company_mode = chat.company_mode
 
             if is_client:
-                if company_id:
+                if is_company_mode:
+                    # ЗАДАЧА 5: Режим компании — морозим ВСЕХ клиентов в этом чате
+                    # (участники без профиля / с типом CLIENT)
+                    models.ChatMember.update(is_blocked=True).where(
+                        (models.ChatMember.chat_id == chat_id) &
+                        (models.ChatMember.member_type == models.MemberType.CLIENT)
+                    ).execute()
+                elif company_id:
+                    # Старое поведение: морозим по компании
                     models.ChatMember.update(is_blocked=True).where(
                         (models.ChatMember.chat_id == chat_id) &
                         (models.ChatMember.company_id == company_id)
@@ -298,6 +392,7 @@ async def _process_and_send(
                         models.Company.id == company_id
                     ).execute()
                 else:
+                    # Без режима компании и без company_id — морозим только нарушителя
                     member.is_blocked = True
                     member.save()
             else:
@@ -305,26 +400,20 @@ async def _process_and_send(
                     member.is_blocked = True
                     member.save()
 
-            # Это было скриывание сообщения запретного
-            # models.Message.create(
-            #     member_id=member.id,
-            #     text=text[:4000],
-            #     has_forbidden=True,
-            # )
-
         try:
             await message.delete()
         except Exception:
             pass
 
-        from text_templates import COMPANY_BANNED_TEXT, EMPLOYEE_BANNED_TEXT
-        ban_msg = COMPANY_BANNED_TEXT if (is_client and company_id) else EMPLOYEE_BANNED_TEXT
-        await message.answer(ban_msg)
+        # ЗАДАЧА 7: пишем «чат заморожен, идёт разбирательство»
+        from text_templates import CHAT_FROZEN_VIOLATION_TEXT
+        await message.answer(CHAT_FROZEN_VIOLATION_TEXT)
 
         await notify_admins_violation(
             message.bot, chat, member, text,
             is_client_violation=is_client,
             company_id=company_id,
+            is_company_mode=is_company_mode,
         )
         return
 
@@ -402,7 +491,6 @@ async def _send_history_message(
     chat_token = str(chat_id_db)
 
     with models.connector:
-        # Задача 5: сортируем по возрастанию (старые сначала)
         all_messages = list(
             models.Message.select()
             .join(models.ChatMember)
@@ -423,17 +511,13 @@ async def _send_history_message(
 
     blocks = _build_message_blocks(all_messages, bot_username, chat_token)
 
-    # Задача 5: страницы — последняя страница = самые новые
-    # page=0 всегда показывает самую последнюю (новую) страницу
     pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
 
-    # Задача 11: отмечаем как прочитанное
     if member_id and all_messages:
         _mark_read(member_id, all_messages[-1].id)
 
-    # Блоки уже в хронологическом порядке (старые→новые), страница тоже
     text_body = "\n\n".join(pages[page])
     header = (prefix + "\n\n" if prefix else "") + \
              f"📋 <b>История чата «{chat.title}»</b> (стр. {page + 1}/{total_pages})\n\n"
@@ -477,7 +561,6 @@ async def _show_history(call: types.CallbackQuery, chat_id: int, page: int, user
             await call.answer("Чат не найден", show_alert=True)
             return
 
-        # Задача 5: сортировка ASC — старые сначала, новые в конце
         all_messages = list(
             models.Message.select()
             .join(models.ChatMember)
@@ -488,7 +571,6 @@ async def _show_history(call: types.CallbackQuery, chat_id: int, page: int, user
             .order_by(models.Message.date_create.asc())
         )
 
-        # Задача 11: получаем member_id текущего пользователя
         member = models.ChatMember.get_or_none(
             (models.ChatMember.user_id == user_id) &
             (models.ChatMember.chat_id == chat_id)
@@ -504,13 +586,10 @@ async def _show_history(call: types.CallbackQuery, chat_id: int, page: int, user
 
     blocks = _build_message_blocks(all_messages, bot_username, chat_token)
 
-    # Задача 5: разбиваем на страницы (без разворота)
-    # page=0 — самая последняя страница (самые новые)
     pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
     total_pages = len(pages)
     page = max(0, min(page, total_pages - 1))
 
-    # Задача 11: отмечаем прочитанными все сообщения последней страницы
     if member_id and all_messages:
         _mark_read(member_id, all_messages[-1].id)
 
@@ -592,7 +671,6 @@ def _build_message_blocks(all_messages, bot_username: str, chat_token: str) -> l
         try:
             with models.connector:
                 member = msg.member_id
-                # Задача 4: МСК время
                 dt = _msk_dt(msg.date_create)
                 name = member.display_name
                 attachments = list(models.Attachment.select().where(
@@ -601,7 +679,6 @@ def _build_message_blocks(all_messages, bot_username: str, chat_token: str) -> l
 
             body_parts = []
             if msg.text:
-                # Задача 5: не обрезаем текст — он уже будет на своей странице
                 body_text = msg.text[:_MAX_MSG_BODY]
                 if len(msg.text) > _MAX_MSG_BODY:
                     body_text += "…"
@@ -648,11 +725,6 @@ def _format_attachments(attachments: list, bot_username: str, chat_token: str, m
 
 
 def _split_blocks_into_pages(blocks: list[str], max_chars: int) -> list[list[str]]:
-    """
-    Задача 5: разбиваем блоки на страницы хронологически.
-    page[0] = самые старые, page[-1] = самые новые.
-    Индекс страниц для пользователя: page=0 → последняя (новая) страница.
-    """
     pages: list[list[str]] = []
     current_page: list[str] = []
     current_len = 0
@@ -673,7 +745,6 @@ def _split_blocks_into_pages(blocks: list[str], max_chars: int) -> list[list[str
     if current_page:
         pages.append(current_page)
 
-    # Разворачиваем: page[0] = самая новая, page[-1] = самая старая
     pages.reverse()
 
     return pages if pages else [[]]

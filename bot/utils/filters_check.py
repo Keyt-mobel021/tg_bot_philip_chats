@@ -17,11 +17,9 @@ for _p in config.ALL_FILTER_PATTERNS:
 def _normalize(text: str) -> str:
     """
     Нормализует текст перед проверкой:
-    - убирает пробелы, дефисы, скобки, точки между цифрами (для телефонов)
     - заменяет визуально похожие символы (0→о, 3→з и т.п.)
     - приводит к нижнему регистру
     """
-    # Визуально похожие символы (латиница/цифры → кириллица и обратно)
     replacements = {
         '0': 'о', '3': 'з', '4': 'ч', '6': 'б', '8': 'в',
         '@': 'а', '$': 'с', '!': 'и', '1': 'i',
@@ -50,11 +48,12 @@ def check_text_against_filters(
     """
     Проверяет текст против фильтров. Возвращает True если нарушение.
 
-    Этапы проверки для каждого фильтра:
+    ЗАДАЧА 3: Более консервативная проверка:
     1. Прямой regex по оригинальному тексту
-    2. Regex по тексту без разделителей (ловит телефоны с пробелами/точками)
-    3. Regex по нормализованному тексту (ловит замену букв цифрами)
-    4. Нечёткое совпадение слов (fuzz)
+    2. Regex по нормализованному тексту (ловит замену букв)
+    3. Нечёткое совпадение по словам (только для длинных ключевых слов 5+ символов)
+    
+    Убраны: проверка по stripped тексту, агрессивная проверка групп цифр.
     """
     if not text:
         return False
@@ -66,9 +65,7 @@ def check_text_against_filters(
     if not all_filters:
         return False
 
-    text_stripped = _strip_separators(text)
     text_normalized = _normalize(text)
-    text_norm_stripped = _strip_separators(text_normalized)
     text_lower = text.lower()
 
     # ── Проверка встроенных конфиг-паттернов (телефоны, email, ссылки и т.п.) ──
@@ -76,14 +73,8 @@ def check_text_against_filters(
         if compiled.search(text):
             logger.info(f"Config filter hit: pattern='{compiled.pattern}' text='{text[:60]}'")
             return True
-        if compiled.search(text_stripped):
-            logger.info(f"Config filter hit (stripped): pattern='{compiled.pattern}' text='{text[:60]}'")
-            return True
         if compiled.search(text_normalized):
             logger.info(f"Config filter hit (normalized): pattern='{compiled.pattern}' text='{text[:60]}'")
-            return True
-        if compiled.search(text_norm_stripped):
-            logger.info(f"Config filter hit (norm+stripped): pattern='{compiled.pattern}' text='{text[:60]}'")
             return True
 
     for flt in all_filters:
@@ -98,32 +89,21 @@ def check_text_against_filters(
             logger.warning(f"Invalid regex pattern id={getattr(flt, 'id', '?')}: {pattern}")
             continue
 
-        # 2. Regex по тексту без разделителей (телефоны вида +7 999 123 45 67)
-        try:
-            if re.search(pattern, text_stripped, re.IGNORECASE):
-                logger.info(f"Filter hit (stripped): pattern='{pattern}' text='{text[:60]}'")
-                return True
-        except re.error:
-            pass
-
-        # 3. Regex по нормализованному тексту (замена букв цифрами/символами)
+        # 2. Regex по нормализованному тексту (замена букв цифрами/символами)
         try:
             if re.search(pattern, text_normalized, re.IGNORECASE):
                 logger.info(f"Filter hit (normalized): pattern='{pattern}' text='{text[:60]}'")
                 return True
-            if re.search(pattern, text_norm_stripped, re.IGNORECASE):
-                logger.info(f"Filter hit (norm+stripped): pattern='{pattern}' text='{text[:60]}'")
-                return True
         except re.error:
             pass
 
-        # 4. Нечёткое совпадение по словам
-        keywords = re.findall(r'[а-яёa-z]{4,}', pattern.lower())
+        # 3. Нечёткое совпадение по словам (только длинные ключевые слова)
+        keywords = re.findall(r'[а-яёa-z]{5,}', pattern.lower())
         if not keywords:
             continue
 
-        text_words = re.findall(r'[а-яёa-z]{3,}', text_lower)
-        text_norm_words = re.findall(r'[а-яёa-z]{3,}', text_normalized)
+        text_words = re.findall(r'[а-яёa-z]{4,}', text_lower)
+        text_norm_words = re.findall(r'[а-яёa-z]{4,}', text_normalized)
         all_words = list(set(text_words + text_norm_words))
 
         for tw in all_words:
@@ -131,19 +111,5 @@ def check_text_against_filters(
                 if fuzz.ratio(tw, kw) >= fuzzy_threshold:
                     logger.info(f"Filter hit (fuzzy): '{tw}'~'{kw}' text='{text[:60]}'")
                     return True
-                
-        # 5. Грубая проверка: извлекаем все цифры подряд группами 10-11 штук
-        digits_only = re.sub(r'\D', '', text)
-        # Ищем в тексте все последовательности цифр длиной 10+
-        digit_groups = re.findall(r'\d{10,}', re.sub(r'\s', '', text.replace('-', '').replace('.', '').replace('(', '').replace(')', '').replace('+', '')))
-        for group in digit_groups:
-            # 11 цифр начинающихся на 7 или 8 — российский номер
-            if len(group) >= 10 and group[0] in ('7', '8', '9'):
-                logger.info(f"Filter hit (digits): group='{group}' text='{text[:60]}'")
-                return True
-            # 10 цифр начинающихся на 9 — мобильный без кода
-            if len(group) == 10 and group[0] == '9':
-                logger.info(f"Filter hit (digits): group='{group}' text='{text[:60]}'")
-                return True
 
     return False

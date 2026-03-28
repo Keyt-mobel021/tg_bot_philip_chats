@@ -6,11 +6,12 @@ import secrets
 connector = peewee.SqliteDatabase('/var/www/site_bot/db.sqlite3')
 
 
+
 class BaseModel(peewee.Model):
     class Meta:
         database = connector
-
-
+ 
+ 
 # -=-=- Telegram пользователь -=-=-
 class UserTelegram(BaseModel):
     # Id Telegram
@@ -27,14 +28,14 @@ class UserTelegram(BaseModel):
     is_block = peewee.BooleanField(default=False)
     # Дата создания
     date_create = peewee.DateTimeField()
-
+ 
     class Meta:
         table_name = 'main_usertelegram'
-
+ 
     def __str__(self):
         return self.full_name or str(self.id)
-
-
+ 
+ 
 # -=-=- Модель Данных состояний -=-=-
 class DataState(peewee.Model):
     id = peewee.IntegerField(unique=True, primary_key=True, index=True)
@@ -44,14 +45,14 @@ class DataState(peewee.Model):
     state = peewee.CharField(max_length=255, null=True)
     # Данные состояния
     data = peewee.BlobField(null=True)
-
+ 
     class Meta:
         database = connector
         table_name = 'main_datastate'
-
-
-
-
+ 
+ 
+ 
+ 
 # -=-=- Тексты бота (правила, приветствия и т.п.) -=-=-
 class BotTextType(str):
     RULES = 'rules'
@@ -145,6 +146,9 @@ class Chat(BaseModel):
     admin_description = peewee.TextField(null=True)
     is_visible = peewee.BooleanField(default=True)
     is_frozen = peewee.BooleanField(default=False)
+    # ЗАДАЧА 5: Режим компании — если True, при нарушении клиента морозим ВСЕХ
+    # клиентов (участников без профиля), а не только нарушителя
+    company_mode = peewee.BooleanField(default=True)
     creator_id = peewee.ForeignKeyField(Profile, null=True, backref='created_chats', on_delete='SET NULL')
     date_create = peewee.DateTimeField(default=datetime.datetime.now)
  

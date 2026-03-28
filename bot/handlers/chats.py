@@ -1,9 +1,6 @@
 """
 Хендлеры: список чатов, создание, заморозка, выход.
-Исправления:
-  - Задача 7: delete_confirm не реагировал — убран лишний вложенный with connector
-  - Задача 8: при создании чата добавлен шаг ввода приватного описания
-  - Задача 4: часовой пояс МСК
+ЗАДАЧА 6: переключение режима компании.
 """
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -93,7 +90,6 @@ async def fsm_chat_description(message: types.Message, state: FSMContext, **_):
     if description == '-':
         description = None
     await state.update_data(description=description)
-    # Задача 8: переходим к шагу приватного описания
     await state.set_state(ChatCreateState.get_admin_description)
 
     try:
@@ -189,7 +185,7 @@ async def fsm_chat_filters(
         chat = models.Chat.create(
             title=data['title'],
             description=data.get('description'),
-            admin_description=data.get('admin_description'),   # Задача 8
+            admin_description=data.get('admin_description'),
             creator_id=profile.id if profile else None,
         )
 
@@ -318,6 +314,38 @@ async def cb_freeze_confirm(
 
 
 # ══════════════════════════════════════════════
+#  ЗАДАЧА 6: Переключение режима компании
+# ══════════════════════════════════════════════
+@router.callback_query(ChatCD.filter(F.action == ChatAction.toggle_company_mode), CheckUser())
+async def cb_toggle_company_mode(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    user: models.UserTelegram,
+    is_admin_or_manager: bool,
+):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+
+    chat_id = callback_data.chat_id
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await call.answer("Чат не найден", show_alert=True)
+            return
+        chat.company_mode = not chat.company_mode
+        chat.save()
+        new_mode = chat.company_mode
+
+    mode_text = "включён 🏢" if new_mode else "выключен 👤"
+    await show_chat_detail(
+        call, chat_id, user, is_admin_or_manager=True,
+        prefix=f"✅ Режим компании {mode_text}."
+    )
+    await call.answer()
+
+
+# ══════════════════════════════════════════════
 #  Выйти из чата
 # ══════════════════════════════════════════════
 @router.callback_query(ChatCD.filter(F.action == ChatAction.leave), CheckUser())
@@ -408,7 +436,7 @@ async def cb_chat_back(
 
 
 # ══════════════════════════════════════════════
-#  Удалить чат — ИСПРАВЛЕНО (Задача 7)
+#  Удалить чат
 # ══════════════════════════════════════════════
 @router.callback_query(ChatCD.filter(F.action == ChatAction.delete), CheckUser())
 async def cb_delete_chat_ask(call: types.CallbackQuery, callback_data: ChatCD, is_admin_or_manager: bool):
@@ -444,7 +472,6 @@ async def cb_delete_chat_confirm(
         await call.answer("Недостаточно прав", show_alert=True)
         return
 
-    # page=0 — нажали «Нет»
     if callback_data.page != 1:
         await show_chat_detail(call, callback_data.chat_id, user, is_admin_or_manager=True)
         await call.answer("Отменено")
@@ -452,7 +479,6 @@ async def cb_delete_chat_confirm(
 
     chat_id = callback_data.chat_id
 
-    # ИСПРАВЛЕНИЕ: сначала получаем данные, потом удаляем — всё в одном блоке
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         if not chat:
@@ -461,15 +487,12 @@ async def cb_delete_chat_confirm(
 
         chat_title = chat.title
 
-        # Собираем список участников ДО удаления
         members = list(models.ChatMember.select().where(
             models.ChatMember.chat_id == chat_id
         ))
 
-        # Удаляем чат (cascade удалит участников, сообщения, вложения)
         chat.delete_instance(recursive=True)
 
-    # Уведомляем участников уже после удаления
     for m in members:
         if m.user_id_id and m.user_id_id != call.from_user.id:
             try:
