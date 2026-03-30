@@ -39,6 +39,20 @@ async def cb_filters_menu(call: types.CallbackQuery, callback_data, is_admin_or_
     )
     await call.answer()
 
+@router.callback_query(FiltersCD.filter(F.action == FiltersAction.page), CheckUser())
+async def cb_filters_page(call: types.CallbackQuery, callback_data: FiltersCD, is_admin_or_manager: bool):
+    if not is_admin_or_manager:
+        await call.answer("Недостаточно прав", show_alert=True)
+        return
+    with models.connector:
+        filters = list(models.GlobalFilter.select().order_by(models.GlobalFilter.date_create))
+    await call.message.edit_text(
+        f"🚫 <b>Глобальные фильтры</b> ({len(filters)})\n\nПрименяются ко всем чатам бота.",
+        reply_markup=global_filters_keyboard(filters, page=callback_data.page),
+        parse_mode="HTML",
+    )
+    await call.answer()
+    
 
 @router.callback_query(FiltersCD.filter(F.action == FiltersAction.select_global), CheckUser())
 async def cb_global_filter_detail(call: types.CallbackQuery, callback_data: FiltersCD, is_admin_or_manager: bool):

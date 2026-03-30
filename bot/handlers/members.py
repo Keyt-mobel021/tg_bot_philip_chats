@@ -256,7 +256,7 @@ async def cb_add_profile_to_chat(call: types.CallbackQuery, callback_data: Membe
             .first()
         )
         models.MessageRead.create(
-            member=new_member,
+            member_id=new_member,
             last_read_message_id=last_msg.id if last_msg else 0,
         )
 
