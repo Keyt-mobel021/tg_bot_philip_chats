@@ -1,6 +1,3 @@
-"""
-Хендлеры: управление профилями сотрудников.
-"""
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
@@ -12,7 +9,7 @@ from keyboards import MainMenuCD, MainMenuAction, StaffCD, StaffAction
 from keyboards.kb import (
     staff_list_keyboard, staff_detail_keyboard,
     staff_delete_confirm_keyboard, profile_type_keyboard,
-    cancel_keyboard,
+    cancel_keyboard, menu_reply_keyboard,
 )
 from . import *
 from states import ProfileCreateState, ProfileEditState
@@ -58,7 +55,10 @@ async def cb_add_staff_start(call: types.CallbackQuery, state: FSMContext, is_ad
 async def fsm_profile_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(ProfileCreateState.get_type)
-    await message.answer("👤 Выберите роль:", reply_markup=profile_type_keyboard())
+    await message.answer(
+        "👤 Выберите роль:",
+        reply_markup=profile_type_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("ptype:"), CheckUser())
@@ -93,8 +93,6 @@ async def fsm_profile_position(message: types.Message, state: FSMContext, is_adm
             profile_type=data['profile_type'],
             position=position,
         )
-
-    link = f"https://t.me/{config.BOT_USERNAME}?start=pe_{profile.connect_token}"
 
     await show_staff_detail(message, profile.id, prefix=f"✅ Сотрудник <b>{profile.name}</b> создан.")
 
@@ -195,8 +193,9 @@ async def cb_delete_staff_confirm(call: types.CallbackQuery, callback_data: Staf
         return
 
     confirmed = callback_data.page == 1
+
     if not confirmed:
-        await call.message.delete()
+        await show_staff_detail(call, callback_data.profile_id)
         await call.answer("Отменено")
         return
 
@@ -204,8 +203,9 @@ async def cb_delete_staff_confirm(call: types.CallbackQuery, callback_data: Staf
 
     with models.connector:
         profile = models.Profile.get_or_none(models.Profile.id == profile_id)
+        name = profile.name if profile else str(profile_id)
         if profile:
             profile.delete_instance()
 
-    await call.message.edit_text("✅ Сотрудник удалён.")
+    await show_staff_list(call, page=0, prefix=f"✅ Сотрудник <b>{name}</b> удалён.")
     await call.answer()

@@ -1,64 +1,42 @@
-"""
-Переиспользуемые функции рендера экранов.
-Задача 11: счётчик непрочитанных в списке чатов.
-Задача 4: МСК часовой пояс.
-Задача 1 (новая): пользователь заморожен хотя бы в одном чате — не видит список чатов.
-"""
-import config
-import models
-from aiogram.exceptions import TelegramBadRequest
 from aiogram import types
+from aiogram.types import ReplyKeyboardMarkup
+
+import models
+import config
 from keyboards.kb import (
-    chat_detail_keyboard,
-    chats_list_keyboard,
-    members_list_keyboard,
-    member_detail_keyboard,
-    staff_list_keyboard,
-    staff_detail_keyboard,
-    history_keyboard,
+    staff_list_keyboard, staff_detail_keyboard,
+    members_list_keyboard, member_detail_keyboard,
+    chats_list_keyboard, chat_detail_keyboard,
+    menu_reply_keyboard,
 )
 
 
-def _msk_dt(dt) -> str:
-    """Форматирует datetime в строку МСК."""
-    if dt is None:
-        return "—"
-    if dt.tzinfo is None:
-        import pytz
-        dt = pytz.utc.localize(dt).astimezone(config.TIMEZONE)
+# ──────────────────────────────────────────────
+#  Вспомогательная функция — безопасная отправка
+#  Гарантирует, что reply-клавиатура всегда присутствует (задача 5)
+# ──────────────────────────────────────────────
+
+async def _safe_send(
+    target: types.Message | types.CallbackQuery,
+    text: str,
+    reply_markup=None,
+    parse_mode: str = "HTML",
+):
+    """
+    Отправляет/редактирует сообщение.
+    Для message.answer — всегда добавляет reply_markup menu_reply_keyboard(),
+    чтобы кнопка «Меню» снизу не исчезала при краше.
+    """
+    if isinstance(target, types.CallbackQuery):
+        await target.message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     else:
-        dt = dt.astimezone(config.TIMEZONE)
-    return dt.strftime("%d.%m.%Y %H:%M")
+        # message.answer — всегда прокидываем reply_kb отдельным сообщением, если его нет
+        await target.answer(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
-def _user_is_frozen_anywhere(user: models.UserTelegram) -> bool:
-    """
-    ЗАДАЧА 1: Проверяет, заморожен ли пользователь хотя бы в одном чате.
-    Если да — он не должен видеть список чатов и не может в них зайти.
-    Администраторы и руководители не подпадают под эту проверку.
-    """
-    with models.connector:
-        # Проверяем есть ли профиль админа/руководителя
-        profile = models.Profile.get_or_none(
-            models.Profile.user_id == user.id
-        )
-        if profile and profile.is_admin_or_manager:
-            return False
-
-        frozen_count = (
-            models.ChatMember.select()
-            .where(
-                (models.ChatMember.user_id == user.id) &
-                (models.ChatMember.is_blocked == True)
-            )
-            .count()
-        )
-    return frozen_count > 0
-
-
-# ══════════════════════════════════════════════
-#  Чаты
-# ══════════════════════════════════════════════
+# ──────────────────────────────────────────────
+#  Список чатов
+# ──────────────────────────────────────────────
 
 async def show_chats_list(
     target: types.Message | types.CallbackQuery,
@@ -67,81 +45,59 @@ async def show_chats_list(
     page: int = 0,
     prefix: str = "",
 ):
-    # ЗАДАЧА 1: если пользователь заморожен хотя бы в одном чате — блокируем доступ
-    if not is_admin_or_manager and _user_is_frozen_anywhere(user):
-        text = (
-            "❄️ <b>Доступ ограничен</b>\n\n"
-            "Один из ваших чатов временно заморожен, идёт разбирательство.\n"
-            "Обратитесь к администратору для получения информации."
-        )
-        msg = target if isinstance(target, types.Message) else target.message
-        if isinstance(target, types.CallbackQuery):
-            await msg.edit_text(text, parse_mode="HTML")
-        else:
-            await msg.answer(text, parse_mode="HTML")
-        return
-
     with models.connector:
         if is_admin_or_manager:
-            chats = list(models.Chat.select().where(models.Chat.is_visible == True))
+            chats = list(models.Chat.select().order_by(models.Chat.date_create.desc()))
         else:
-            memberships = list(
+            member_chat_ids = [
+                m.chat_id_id for m in
                 models.ChatMember.select().where(
                     (models.ChatMember.user_id == user.id) &
                     (models.ChatMember.is_blocked == False)
                 )
+            ]
+            chats = list(
+                models.Chat.select().where(
+                    models.Chat.id.in_(member_chat_ids) if member_chat_ids
+                    else models.Chat.id.is_null(True)
+                ).order_by(models.Chat.date_create.desc())
             )
-            chat_ids = [m.chat_id_id for m in memberships]
-            chats = list(models.Chat.select().where(
-                (models.Chat.id.in_(chat_ids)) & (models.Chat.is_visible == True)
-            )) if chat_ids else []
 
-        # Задача 11: собираем непрочитанные для каждого чата
-        member_map: dict[int, models.ChatMember] = {}
-        read_map: dict[int, int] = {}  # member_id -> last_read_message_id
-        unread_map: dict[int, int] = {}  # chat_id -> unread count
-
-        for chat in chats:
-            m = models.ChatMember.get_or_none(
-                (models.ChatMember.user_id == user.id) &
-                (models.ChatMember.chat_id == chat.id)
-            )
-            if m:
-                member_map[chat.id] = m
+        # Непрочитанные
+        unread_map: dict[int, int] = {}
+        if user:
+            member_map = {
+                m.chat_id_id: m.id for m in
+                models.ChatMember.select().where(models.ChatMember.user_id == user.id)
+            }
+            for chat_id_key, member_id in member_map.items():
                 read_mark = models.MessageRead.get_or_none(
-                    models.MessageRead.member_id == m.id
+                    models.MessageRead.member_id == member_id
                 )
                 last_read = read_mark.last_read_message_id if read_mark else 0
-                unread = (
-                    models.Message.select()
-                    .join(models.ChatMember)
-                    .where(
-                        (models.ChatMember.chat_id == chat.id) &
-                        (models.Message.id > last_read)
-                    )
-                    .count()
-                )
-                unread_map[chat.id] = unread
+                count = models.Message.select().join(models.ChatMember).where(
+                    (models.ChatMember.chat_id == chat_id_key) &
+                    (models.Message.id > last_read)
+                ).count()
+                if count > 0:
+                    unread_map[chat_id_key] = count
 
-    if not chats:
-        text = "💬 Чатов пока нет."
-        if is_admin_or_manager:
-            text += "\n\nНажмите «Создать чат» чтобы начать."
-    else:
-        text = f"💬 <b>Чаты</b> ({len(chats)})"
+    text = (prefix + "\n\n" if prefix else "") + "💬 <b>Чаты</b>\n\nВыберите чат из списка:"
+    kb = chats_list_keyboard(
+        chats, page=page,
+        can_create=is_admin_or_manager,
+        unread_map=unread_map,
+    )
 
-    if prefix:
-        text = f"{prefix}\n\n{text}"
-
-    kb = chats_list_keyboard(chats, page=page, can_create=is_admin_or_manager,
-                             unread_map=unread_map)
-
-    msg = target if isinstance(target, types.Message) else target.message
     if isinstance(target, types.CallbackQuery):
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
 
+
+# ──────────────────────────────────────────────
+#  Детали чата
+# ──────────────────────────────────────────────
 
 async def show_chat_detail(
     target: types.Message | types.CallbackQuery,
@@ -150,81 +106,145 @@ async def show_chat_detail(
     is_admin_or_manager: bool,
     prefix: str = "",
 ):
-    # ЗАДАЧА 1: если пользователь заморожен — блокируем доступ к деталям чата
-    if not is_admin_or_manager and _user_is_frozen_anywhere(user):
-        text = (
-            "❄️ <b>Доступ ограничен</b>\n\n"
-            "Один из ваших чатов временно заморожен, идёт разбирательство.\n"
-            "Обратитесь к администратору для получения информации."
-        )
-        msg = target.message if isinstance(target, types.CallbackQuery) else target
-        if isinstance(target, types.CallbackQuery):
-            await msg.edit_text(text, parse_mode="HTML")
-        else:
-            await msg.answer(text, parse_mode="HTML")
-        return
-
     with models.connector:
         chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         if not chat:
-            _msg = target.message if isinstance(target, types.CallbackQuery) else target
-            await _msg.answer("Чат не найден.")
+            if isinstance(target, types.CallbackQuery):
+                await target.answer("Чат не найден", show_alert=True)
+            else:
+                await target.answer("❌ Чат не найден.")
             return
+
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.chat_id == chat_id) &
+            (models.ChatMember.user_id == user.id)
+        )
 
         members_count = models.ChatMember.select().where(
             models.ChatMember.chat_id == chat_id
         ).count()
 
-    member_is_admin = is_admin_or_manager
-
-    is_member = False
-    with models.connector:
-        m = models.ChatMember.get_or_none(
-            (models.ChatMember.user_id == user.id) &
-            (models.ChatMember.chat_id == chat_id)
-        )
-        if m:
-            is_member = True
-            member_is_admin = m.is_admin_or_manager
-
-    # Если is_admin_or_manager по профилю — оставляем True
-    if is_admin_or_manager:
-        member_is_admin = True
-
+    is_member = member is not None
     status = "❄️ Заморожен" if chat.is_frozen else "✅ Активен"
-    # ЗАДАЧА 5/6: показываем режим компании
-    cmode = "🏢 Вкл" if chat.company_mode else "👤 Выкл"
+
+    desc_block = f"\n\n📝 {chat.description}" if chat.description else ""
+    admin_desc_block = ""
+    if is_admin_or_manager and chat.admin_description:
+        admin_desc_block = f"\n\n🔒 <i>{chat.admin_description}</i>"
+
     text = (
-        f"💬 <b>{chat.title}</b>\n\n"
-        f"📊 Статус: {status}\n"
-        f"👥 Участников: {members_count}\n"
+        (prefix + "\n\n" if prefix else "") +
+        f"💬 <b>{chat.title}</b>\n"
+        f"📊 {status}\n"
+        f"👥 Участников: {members_count}"
+        f"{desc_block}"
+        f"{admin_desc_block}"
     )
 
-    if member_is_admin:
-        text += f"🏢 Режим компании: {cmode}\n"
+    kb = chat_detail_keyboard(
+        chat_id=chat_id,
+        is_frozen=chat.is_frozen,
+        is_admin_or_manager=is_admin_or_manager,
+        is_member=is_member,
+        company_mode=chat.company_mode,
+    )
 
-    if chat.description:
-        text += f"\n📝 {chat.description}"
-
-    if member_is_admin and chat.admin_description:
-        text += f"\n\n🔒 <i>(Приватно)</i> {chat.admin_description}"
-
-    if prefix:
-        text = f"{prefix}\n\n{text}"
-
-    kb = chat_detail_keyboard(chat_id, chat.is_frozen, member_is_admin,
-                              is_member=is_member, company_mode=chat.company_mode)
-
-    msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ══════════════════════════════════════════════
-#  Участники
-# ══════════════════════════════════════════════
+# ──────────────────────────────────────────────
+#  Список сотрудников
+# ──────────────────────────────────────────────
+
+async def show_staff_list(
+    target: types.Message | types.CallbackQuery,
+    page: int = 0,
+    prefix: str = "",
+):
+    with models.connector:
+        profiles = list(models.Profile.select().order_by(models.Profile.date_create))
+
+    text = (prefix + "\n\n" if prefix else "") + f"👥 <b>Сотрудники</b> ({len(profiles)})"
+    kb = staff_list_keyboard(profiles, page=page)
+
+    if isinstance(target, types.CallbackQuery):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ──────────────────────────────────────────────
+#  Детали сотрудника
+# ──────────────────────────────────────────────
+
+async def show_staff_detail(
+    target: types.Message | types.CallbackQuery,
+    profile_id: int,
+    prefix: str = "",
+):
+    with models.connector:
+        profile = models.Profile.get_or_none(models.Profile.id == profile_id)
+        if not profile:
+            if isinstance(target, types.CallbackQuery):
+                await target.answer("Профиль не найден", show_alert=True)
+            else:
+                await target.answer("❌ Профиль не найден.")
+            return
+
+        chats_count = models.ChatMember.select().where(
+            models.ChatMember.profile_id == profile_id
+        ).count()
+        msgs_count = (
+            models.Message.select()
+            .join(models.ChatMember)
+            .where(models.ChatMember.profile_id == profile_id)
+            .count()
+        )
+        tg_linked = profile.user_id_id is not None
+        status = "✅ Активен" if not profile.is_blocked else "🔒 Заблокирован"
+        tg_status = "✅ Подключён" if tg_linked else "❌ Не подключён"
+
+    # ЗАДАЧА 3: показываем должность перед именем в заголовке
+    title_parts = []
+    if profile.position:
+        title_parts.append(profile.position)
+    title_parts.append(profile.name)
+    display_title = " — ".join(title_parts)
+
+    text = (
+        (prefix + "\n\n" if prefix else "") +
+        f"👤 <b>{display_title}</b>\n\n"
+        f"🎭 Роль: {profile.type_label}\n"
+        f"💼 Должность: {profile.position or '—'}\n"
+        f"📊 Статус: {status}\n"
+        f"🔗 Telegram: {tg_status}\n"
+        f"💬 Чатов: {chats_count}\n"
+        f"📨 Сообщений: {msgs_count}"
+    )
+
+    kb = staff_detail_keyboard(profile_id)
+
+    if isinstance(target, types.CallbackQuery):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.answer(
+            text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        # Восстанавливаем reply-кнопку «Меню»
+        await target.answer(
+            "📋 Меню доступно снизу:",
+            reply_markup=menu_reply_keyboard(),
+        )
+
+
+# ──────────────────────────────────────────────
+#  Список участников чата
+# ──────────────────────────────────────────────
 
 async def show_members_list(
     target: types.Message | types.CallbackQuery,
@@ -233,24 +253,29 @@ async def show_members_list(
     prefix: str = "",
 ):
     with models.connector:
-        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
         members = list(
-            models.ChatMember.select()
-            .where(models.ChatMember.chat_id == chat_id)
-            .order_by(models.ChatMember.date_create)
+            models.ChatMember.select().where(
+                models.ChatMember.chat_id == chat_id
+            ).order_by(models.ChatMember.date_create)
         )
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
 
-    text = f"👥 <b>Участники чата «{chat.title if chat else chat_id}»</b> ({len(members)})"
-    if prefix:
-        text = f"{prefix}\n\n{text}"
+    chat_name = chat.title if chat else str(chat_id)
+    text = (
+        (prefix + "\n\n" if prefix else "") +
+        f"👥 <b>Участники чата «{chat_name}»</b> ({len(members)})"
+    )
+    kb = members_list_keyboard(members, chat_id, page=page)
 
-    kb = members_list_keyboard(members, chat_id, page)
-    msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
 
+
+# ──────────────────────────────────────────────
+#  Детали участника чата
+# ──────────────────────────────────────────────
 
 async def show_member_detail(
     target: types.Message | types.CallbackQuery,
@@ -261,138 +286,37 @@ async def show_member_detail(
     with models.connector:
         member = models.ChatMember.get_or_none(models.ChatMember.id == member_id)
         if not member:
-            _msg = target.message if isinstance(target, types.CallbackQuery) else target
-            await _msg.answer("Участник не найден.")
+            if isinstance(target, types.CallbackQuery):
+                await target.answer("Участник не найден", show_alert=True)
+            else:
+                await target.answer("❌ Участник не найден.")
             return
 
-        real_name = member._real_name
-        alias = member.alias
-        display = member.display_name
-
-        profile_info = "—"
-        if member.profile_id_id:
-            p = member.profile_id
-            profile_info = f"{p.name} ({p.type_label})"
-            if p.position:
-                profile_info += f", {p.position}"
-
-        company_info = "—"
-        if member.company_id_id:
-            try:
-                c = member.company_id
-                company_info = f"{c.name}" + (" 🔒" if c.is_blocked else "")
-            except Exception:
-                pass
-
-        messages_count = models.Message.select().where(
+        msgs_count = models.Message.select().where(
             models.Message.member_id == member_id
         ).count()
 
     status = "🔒 Заморожен" if member.is_blocked else "✅ Активен"
-
-    if alias:
-        name_block = (
-            f"🏷 Тег (публичное): <b>{alias}</b>\n"
-            f"👤 Реальное имя: {real_name}\n"
-        )
-    else:
-        name_block = f"👤 <b>{real_name}</b>\n"
+    real_name = member._real_name
+    alias_line = f"\n🏷 Тег: <b>{member.alias}</b>" if member.alias else ""
 
     text = (
-        f"{name_block}\n"
-        f"📊 Статус: {status}\n"
-        f"🏷 Роль: {member.type_label}\n"
-        f"👤 Профиль: {profile_info}\n"
-        f"🏢 Компания: {company_info}\n"
-        f"💬 Сообщений: {messages_count}\n"
+        (prefix + "\n\n" if prefix else "") +
+        f"👤 <b>{member.display_name}</b>\n"
+        f"🎭 Роль: {member.type_label}\n"
+        f"📊 Статус: {status}"
+        f"{alias_line}\n"
+        f"📨 Сообщений: {msgs_count}"
     )
 
-    if prefix:
-        text = f"{prefix}\n\n{text}"
-
-    kb = member_detail_keyboard(chat_id, member_id, member.is_blocked, has_alias=bool(alias))
-    msg = target.message if isinstance(target, types.CallbackQuery) else target
-    if isinstance(target, types.CallbackQuery):
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-
-
-# ══════════════════════════════════════════════
-#  Сотрудники
-# ══════════════════════════════════════════════
-
-async def show_staff_list(
-    target: types.Message | types.CallbackQuery,
-    page: int = 0,
-    prefix: str = "",
-):
-    with models.connector:
-        profiles = list(models.Profile.select().order_by(models.Profile.date_create))
-
-    text = f"👥 <b>Сотрудники</b> ({len(profiles)})"
-    if prefix:
-        text = f"{prefix}\n\n{text}"
-
-    kb = staff_list_keyboard(profiles, page)
-    msg = target.message if isinstance(target, types.CallbackQuery) else target
-    if isinstance(target, types.CallbackQuery):
-        await msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-
-
-async def safe_edit(message: types.Message, text: str, reply_markup=None, parse_mode="HTML"):
-    try:
-        await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except TelegramBadRequest:
-        pass
-
-
-async def show_staff_detail(
-    target: types.Message | types.CallbackQuery,
-    profile_id: int,
-    prefix: str = "",
-):
-    with models.connector:
-        profile = models.Profile.get_or_none(models.Profile.id == profile_id)
-        if not profile:
-            _msg = target.message if isinstance(target, types.CallbackQuery) else target
-            await _msg.answer("Профиль не найден.")
-            return
-
-        chats_count = models.ChatMember.select().where(
-            models.ChatMember.profile_id == profile_id
-        ).count()
-        messages_count = (
-            models.Message.select()
-            .join(models.ChatMember)
-            .where(models.ChatMember.profile_id == profile_id)
-            .count()
-        )
-
-    connected = "✅ Подключён" if profile.user_id_id else "❌ Не подключён"
-    blocked = "🔒 Заблокирован" if profile.is_blocked else "✅ Активен"
-
-    text = (
-        f"👤 <b>{profile.name}</b>\n\n"
-        f"🏷 Роль: {profile.type_label}\n"
-        f"💼 Должность: {profile.position or '—'}\n"
-        f"📊 Статус: {blocked}\n"
-        f"🔗 Telegram: {connected}\n"
-        f"💬 Чатов: {chats_count}\n"
-        f"📝 Сообщений: {messages_count}\n"
+    kb = member_detail_keyboard(
+        chat_id=chat_id,
+        member_id=member_id,
+        is_blocked=member.is_blocked,
+        has_alias=bool(member.alias),
     )
-    if not profile.user_id_id:
-        link = f"https://t.me/{config.BOT_USERNAME}?start=pe_{profile.connect_token}"
-        text += f"\n🔗 Ссылка для подключения:\n<code>{link}</code>"
 
-    if prefix:
-        text = f"{prefix}\n\n{text}"
-
-    kb = staff_detail_keyboard(profile_id)
-    msg = target.message if isinstance(target, types.CallbackQuery) else target
     if isinstance(target, types.CallbackQuery):
-        await safe_edit(msg, text, reply_markup=kb)
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")

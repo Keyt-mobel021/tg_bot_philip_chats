@@ -1,7 +1,3 @@
-"""
-Хендлеры: управление фильтрами (глобальными и по чатам).
-Задача: многострочный ввод = несколько фильтров, без описания.
-"""
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.text_decorations import html_decoration as hd

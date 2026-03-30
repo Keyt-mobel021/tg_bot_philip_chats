@@ -1,6 +1,6 @@
 import math
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
 from keyboards import *
 import config
 import text_templates
@@ -8,6 +8,7 @@ import text_templates
 
 # ──────────────────────────────────────────────
 #  Постоянная Reply-кнопка «Меню»
+#  ЗАДАЧА 5: persistent=True — кнопка не исчезает при краше бота
 # ──────────────────────────────────────────────
 def menu_reply_keyboard() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
@@ -31,7 +32,6 @@ def main_menu_keyboard(is_admin_or_manager: bool = False):
 
 # ──────────────────────────────────────────────
 #  Список чатов
-#  Задача 11: принимает unread_map {chat_id: unread_count}
 # ──────────────────────────────────────────────
 def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
                         unread_map: dict | None = None):
@@ -44,10 +44,9 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
     for chat in page_chats:
         status = "❄️" if chat.is_frozen else "💬"
         unread = unread_map.get(chat.id, 0)
-        # Задача 11: показываем счётчик непрочитанных
         unread_badge = f" (🔴{unread})" if unread > 0 else ""
         builder.button(
-            text=f"{status} {unread_badge} {chat.title}",
+            text=f"{status}{unread_badge} {chat.title}",
             callback_data=ChatsCD(action=ChatsAction.select, chat_id=chat.id, page=page)
         )
 
@@ -64,7 +63,6 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
 
 # ──────────────────────────────────────────────
 #  Детали чата
-#  ЗАДАЧА 6: добавлена кнопка переключения режима компании
 # ──────────────────────────────────────────────
 def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool,
                          is_member: bool = True, company_mode: bool = True):
@@ -86,7 +84,6 @@ def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: boo
                        callback_data=ChatCD(action=ChatAction.filters, chat_id=chat_id))
         builder.button(text="✏️ Переименовать чат",
                        callback_data=ChatCD(action=ChatAction.rename, chat_id=chat_id))
-        # ЗАДАЧА 6: кнопка переключения режима компании
         cmode_text = "🏢 Режим компании: ВКЛ" if company_mode else "👤 Режим компании: ВЫКЛ"
         builder.button(text=cmode_text,
                        callback_data=ChatCD(action=ChatAction.toggle_company_mode, chat_id=chat_id))
@@ -168,7 +165,7 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
 
 
 # ──────────────────────────────────────────────
-#  Кнопки под рассылкой (Задача 2: reply на сообщение от бота)
+#  Кнопки под рассылкой
 # ──────────────────────────────────────────────
 def broadcast_reply_keyboard(chat_id: int):
     builder = InlineKeyboardBuilder()
@@ -179,6 +176,20 @@ def broadcast_reply_keyboard(chat_id: int):
     builder.button(
         text="📋 История сообщений",
         callback_data=ChatCD(action=ChatAction.history, chat_id=chat_id)
+    )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+# ──────────────────────────────────────────────
+#  ЗАДАЧА 4: Уведомление о добавлении в чат — кнопка «Перейти к чату»
+# ──────────────────────────────────────────────
+def chat_join_notification_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура в уведомлении о добавлении в чат — кнопка перехода к чату."""
+    builder = InlineKeyboardBuilder()
+    builder.button(
+        text="💬 Перейти к чату",
+        callback_data=ChatsCD(action=ChatsAction.select, chat_id=chat_id)
     )
     builder.adjust(1)
     return builder.as_markup()
@@ -211,7 +222,6 @@ def members_list_keyboard(members: list, chat_id: int, page: int = 0):
     return builder.as_markup()
 
 
-# ЗАДАЧА 4: убрана кнопка «Привязать к компании»
 def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_alias: bool = False):
     builder = InlineKeyboardBuilder()
     freeze_text = "🔥 Разморозить" if is_blocked else "❄️ Заморозить"
@@ -222,7 +232,6 @@ def member_detail_keyboard(chat_id: int, member_id: int, is_blocked: bool, has_a
     if has_alias:
         builder.button(text="❌ Сбросить тег",
                        callback_data=MembersCD(action=MembersAction.clear_alias, chat_id=chat_id, member_id=member_id))
-    # ЗАДАЧА 4: кнопка «Привязать к компании» УБРАНА
     builder.button(text="🗑 Удалить из чата",
                    callback_data=MembersCD(action=MembersAction.remove, chat_id=chat_id, member_id=member_id))
     builder.button(text="⬅️ Назад",
@@ -257,14 +266,20 @@ def member_remove_confirm_keyboard(chat_id: int, member_id: int):
 
 
 def add_member_keyboard(chat_id: int, profiles: list, tg_users: list):
+    """
+    ЗАДАЧА 3: в кнопках добавления участника показываем должность перед именем.
+    Формат: «👤 Конструктор (5) — Роман» или просто «👤 Роман» если нет должности.
+    """
     builder = InlineKeyboardBuilder()
     builder.button(
         text="🔗 Пригласить по ссылке",
         callback_data=MembersCD(action=MembersAction.invite_link, chat_id=chat_id)
     )
     for p in profiles[:20]:
+        # ЗАДАЧА 3: показываем должность + имя в кнопке
+        label = _profile_button_label(p)
         builder.button(
-            text=f"👤 {p.name}",
+            text=f"👤 {label}",
             callback_data=MembersCD(action=MembersAction.add_profile, chat_id=chat_id, profile_id=p.id)
         )
     builder.button(text="⬅️ Назад",
@@ -285,6 +300,7 @@ def invite_link_keyboard(chat_id: int):
 
 # ──────────────────────────────────────────────
 #  Сотрудники
+#  ЗАДАЧА 3: показываем должность + имя в кнопках списка
 # ──────────────────────────────────────────────
 def staff_list_keyboard(profiles: list, page: int = 0):
     builder = InlineKeyboardBuilder()
@@ -294,8 +310,10 @@ def staff_list_keyboard(profiles: list, page: int = 0):
 
     for p in page_profiles:
         status = "🔒" if p.is_blocked else "👤"
+        # ЗАДАЧА 3: должность перед именем в кнопке списка
+        label = _profile_button_label(p)
         builder.button(
-            text=f"{status} {p.name} ({p.type_label})",
+            text=f"{status} {label} ({p.type_label})",
             callback_data=StaffCD(action=StaffAction.select, profile_id=p.id, page=page)
         )
 
@@ -335,7 +353,6 @@ def staff_delete_confirm_keyboard(profile_id: int):
 
 
 def profile_type_keyboard():
-    from keyboards import StaffCD, StaffAction
     builder = InlineKeyboardBuilder()
     builder.button(text="👑 Администратор", callback_data="ptype:admin")
     builder.button(text="🗂 Руководитель", callback_data="ptype:manager")
@@ -346,14 +363,16 @@ def profile_type_keyboard():
 
 # ──────────────────────────────────────────────
 #  Автоподключение
+#  ЗАДАЧА 3: в кнопках автоподключения тоже показываем должность
 # ──────────────────────────────────────────────
 def autoconnect_keyboard(auto_connects: list):
     builder = InlineKeyboardBuilder()
     for ac in auto_connects:
         try:
             p = ac.profile
+            label = _profile_button_label(p)
             builder.button(
-                text=f"❌ {p.name}",
+                text=f"❌ {label}",
                 callback_data=AutoConnectCD(action=AutoConnectAction.delete, ac_id=ac.id)
             )
         except Exception:
@@ -368,7 +387,8 @@ def autoconnect_keyboard(auto_connects: list):
 def autoconnect_profile_keyboard(profiles: list):
     builder = InlineKeyboardBuilder()
     for p in profiles:
-        builder.button(text=f"👤 {p.name}",
+        label = _profile_button_label(p)
+        builder.button(text=f"👤 {label}",
                        callback_data=AutoConnectCD(action=AutoConnectAction.add_profile, profile_id=p.id))
     builder.button(text="❌ Отмена", callback_data=AutoConnectCD(action=AutoConnectAction.back))
     builder.adjust(1)
@@ -466,14 +486,12 @@ def chats_for_filter_keyboard(chats: list):
 
 # ──────────────────────────────────────────────
 #  Уведомление о нарушении
-#  ЗАДАЧА 5: поддержка разморозки всех клиентов (режим компании)
 # ──────────────────────────────────────────────
 def violation_keyboard(member_id: int, profile_id: int, chat_id: int,
                        company_id: int = 0, is_client: bool = False,
                        is_company_mode: bool = False):
     builder = InlineKeyboardBuilder()
     if is_client and is_company_mode:
-        # Режим компании: морозили всех клиентов — кнопка разморозки всех
         builder.button(
             text="🔓 Разморозить всех клиентов чата",
             callback_data=ViolationCD(
@@ -548,3 +566,14 @@ def delete_chat_confirm_keyboard(chat_id: int):
                    callback_data=ChatCD(action=ChatAction.delete_confirm, chat_id=chat_id, page=0))
     builder.adjust(2)
     return builder.as_markup()
+
+
+# ──────────────────────────────────────────────
+#  Внутренняя утилита: метка профиля с должностью
+#  ЗАДАЧА 3: «Должность (N) — Имя» или просто «Имя»
+# ──────────────────────────────────────────────
+def _profile_button_label(profile) -> str:
+    """Формирует строку «Должность — Имя» для кнопок, если должность задана."""
+    if profile.position:
+        return f"{profile.position} — {profile.name}"
+    return profile.name

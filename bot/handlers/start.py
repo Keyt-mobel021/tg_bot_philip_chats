@@ -1,8 +1,3 @@
-"""
-/start хендлер — точка входа, диплинки, Reply-кнопка меню, подключение профилей.
-Задача 3: welcome text из базы данных (модель BotText, тип 'rules'),
-          fallback на text_templates.WELCOME_TEXT.
-"""
 import datetime
 from aiogram import Router, F, types
 from aiogram.filters import CommandStart
@@ -382,6 +377,10 @@ async def fsm_edit_description(message: types.Message, state: FSMContext):
     chat_id = data["chat_id"]
     await state.clear()
 
+    if not message.text:
+        await message.answer("❌ Описание не может быть пустым. Введите текст или «-» для очистки.")
+        return
+    
     description = message.text.strip()
     if description == "-":
         description = None

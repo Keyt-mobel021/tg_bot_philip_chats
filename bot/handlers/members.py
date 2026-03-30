@@ -1,8 +1,3 @@
-"""
-Хендлеры: управление участниками чата.
-ЗАДАЧА 5: разморозка всех клиентов чата (режим компании).
-ЗАДАЧА 4: убрана привязка к компании.
-"""
 import secrets
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
@@ -21,7 +16,7 @@ from keyboards.kb import (
     members_list_keyboard, member_detail_keyboard,
     member_freeze_confirm_keyboard, member_remove_confirm_keyboard,
     add_member_keyboard, invite_link_keyboard,
-    cancel_keyboard,
+    cancel_keyboard, chat_join_notification_keyboard,
 )
 from states import MemberAliasState
 
@@ -260,17 +255,20 @@ async def cb_add_profile_to_chat(call: types.CallbackQuery, callback_data: Membe
             last_read_message_id=last_msg.id if last_msg else 0,
         )
 
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+
     if profile.user_id_id:
         try:
-            with models.connector:
-                chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+            chat_name = chat.title if chat else str(chat_id)
             await call.bot.send_message(
                 profile.user_id_id,
-                f"👋 Вас добавили в чат <b>{chat.title if chat else chat_id}</b>.",
+                f"👋 Вас добавили в чат <b>{chat_name}</b>.\n\n"
+                f"Нажмите кнопку ниже, чтобы перейти к чату.",
+                reply_markup=chat_join_notification_keyboard(chat_id),
                 parse_mode="HTML",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"add_profile_to_chat: failed to notify user {profile.user_id_id}: {e}")
 
     await show_members_list(call, chat_id, prefix=f"✅ {profile.name} добавлен в чат.")
     await call.answer()
@@ -351,7 +349,6 @@ async def cb_reset_invite_link(call: types.CallbackQuery, callback_data: Members
 # ══════════════════════════════════════════════
 #  Тег/псевдоним участника
 # ══════════════════════════════════════════════
-
 @router.callback_query(MembersCD.filter(F.action == MembersAction.edit_alias), CheckUser())
 async def cb_edit_alias_start(
     call: types.CallbackQuery,
@@ -444,7 +441,6 @@ async def cb_clear_alias(
 # ══════════════════════════════════════════════
 #  Разморозить всю компанию заказчика
 # ══════════════════════════════════════════════
-
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_company), CheckUser())
 async def cb_unfreeze_company(
     call: types.CallbackQuery,
@@ -495,7 +491,6 @@ async def cb_unfreeze_company(
 # ══════════════════════════════════════════════
 #  ЗАДАЧА 5: Разморозить всех клиентов чата (режим компании)
 # ══════════════════════════════════════════════
-
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_all_clients), CheckUser())
 async def cb_unfreeze_all_clients(
     call: types.CallbackQuery,
@@ -539,7 +534,6 @@ async def cb_unfreeze_all_clients(
 # ══════════════════════════════════════════════
 #  Разморозить участника из уведомления
 # ══════════════════════════════════════════════
-
 @router.callback_query(ViolationCD.filter(F.action == ViolationAction.unfreeze_member), CheckUser())
 async def cb_unfreeze_member_from_violation(
     call: types.CallbackQuery,

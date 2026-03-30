@@ -1,6 +1,3 @@
-"""
-Хендлеры: Автоподключение.
-"""
 from aiogram import Router, F, types
 from filters import CheckUser
 from keyboards import MainMenuCD, MainMenuAction, AutoConnectCD, AutoConnectAction

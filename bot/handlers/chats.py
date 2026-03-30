@@ -1,7 +1,3 @@
-"""
-Хендлеры: список чатов, создание, заморозка, выход.
-ЗАДАЧА 6: переключение режима компании.
-"""
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
