@@ -67,12 +67,13 @@ def chats_list_keyboard(chats: list, page: int = 0, can_create: bool = False,
 def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: bool,
                          is_member: bool = True, company_mode: bool = True):
     builder = InlineKeyboardBuilder()
-    builder.button(text="✏️ Написать сообщение",
-                   callback_data=ChatCD(action=ChatAction.write, chat_id=chat_id))
-    builder.button(text="📋 Посмотреть сообщения",
-                   callback_data=ChatCD(action=ChatAction.history, chat_id=chat_id))
 
     if is_admin_or_manager:
+        # Админ — старый интерфейс с кнопками
+        builder.button(text="✏️ Написать сообщение",
+                       callback_data=ChatCD(action=ChatAction.write, chat_id=chat_id))
+        builder.button(text="📋 Посмотреть сообщения",
+                       callback_data=ChatCD(action=ChatAction.history, chat_id=chat_id))
         freeze_text = "🔥 Разморозить" if is_frozen else "❄️ Заморозить"
         builder.button(text=freeze_text,
                        callback_data=ChatCD(action=ChatAction.freeze, chat_id=chat_id))
@@ -90,6 +91,9 @@ def chat_detail_keyboard(chat_id: int, is_frozen: bool, is_admin_or_manager: boo
         builder.button(text="🗑 Удалить чат",
                        callback_data=ChatCD(action=ChatAction.delete, chat_id=chat_id))
     else:
+        # Обычный пользователь/сотрудник — сразу вход в сессию
+        builder.button(text="💬 Войти в чат",
+                       callback_data=ChatCD(action=ChatAction.history, chat_id=chat_id))
         builder.button(text="🚪 Выйти из чата",
                        callback_data=ChatCD(action=ChatAction.leave, chat_id=chat_id))
 
@@ -161,6 +165,30 @@ def history_keyboard(chat_id: int, page: int, total_pages: int):
     builder.button(text="⬅️ Назад к чату",
                    callback_data=ChatsCD(action=ChatsAction.select, chat_id=chat_id))
     builder.adjust(1)
+    return builder.as_markup()
+
+def session_keyboard(chat_id: int, page: int, total_pages: int):
+    """Клавиатура под сообщением с историей в режиме сессии."""
+    builder = InlineKeyboardBuilder()
+
+    # Пагинация
+    nav = []
+    if page < total_pages - 1:
+        nav.append(("⬅️ Старее", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page + 1)))
+    nav.append((f"стр. {page + 1}/{total_pages}", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page)))
+    if page > 0:
+        nav.append(("Новее ➡️", HistoryCD(action=HistoryAction.page, chat_id=chat_id, page=page - 1)))
+    for text, cd in nav:
+        builder.button(text=text, callback_data=cd)
+
+    # Кнопка выхода
+    builder.button(text="🚪 Выйти из чата",
+                   callback_data=ChatsCD(action=ChatsAction.back))
+
+    if len(nav) > 1:
+        builder.adjust(len(nav), 1)
+    else:
+        builder.adjust(1)
     return builder.as_markup()
 
 

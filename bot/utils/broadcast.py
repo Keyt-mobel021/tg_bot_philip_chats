@@ -67,6 +67,7 @@ async def notify_admins_violation(
     is_client_violation: bool = False,
     company_id: int = 0,
     is_company_mode: bool = False,
+    filter_hit: dict | None = None,
 ):
     """
     Уведомляет администраторов и руководителей о нарушении фильтра.
@@ -98,11 +99,29 @@ async def notify_admins_violation(
     else:
         ban_info = "👤 <b>Сотрудник заморожен</b> в этом чате\n"
 
+    # Информация о сработавшем фильтре
+    filter_info = ""
+    if filter_hit:
+        match_type_labels = {
+            "config": "Встроенный фильтр",
+            "config_normalized": "Встроенный фильтр (нормализация)",
+            "regex": "Regex совпадение",
+            "regex_normalized": "Regex (нормализация символов)",
+            "fuzzy": "Нечёткое совпадение",
+        }
+        type_label = match_type_labels.get(filter_hit["match_type"], filter_hit["match_type"])
+        filter_info = (
+            f"\n🔍 <b>Сработал:</b> {type_label}\n"
+            f"📌 Паттерн: <code>{filter_hit['pattern'][:100]}</code>\n"
+            f"🎯 Совпало: <code>{filter_hit['matched_text']}</code>\n"
+        )
+
     notify_text = (
         f"🚨 <b>Нарушение фильтра</b>\n\n"
         f"💬 Чат: <b>{chat.title}</b>\n"
         f"👤 Участник: <b>{name}</b>\n"
         f"{ban_info}"
+        f"{filter_info}"
         f"📝 Сообщение:\n<blockquote>{text[:400]}</blockquote>"
     )
 

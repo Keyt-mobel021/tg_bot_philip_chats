@@ -44,60 +44,80 @@ def check_text_against_filters(
     chat_filters: list,
     global_filters: list,
     fuzzy_threshold: int = 80,
-) -> bool:
+) -> dict | None:
     """
-    Проверяет текст против фильтров. Возвращает True если нарушение.
-
-    ЗАДАЧА 3: Более консервативная проверка:
-    1. Прямой regex по оригинальному тексту
-    2. Regex по нормализованному тексту (ловит замену букв)
-    3. Нечёткое совпадение по словам (только для длинных ключевых слов 5+ символов)
-    
-    Убраны: проверка по stripped тексту, агрессивная проверка групп цифр.
+    Проверяет текст против фильтров.
+    Возвращает None если нарушений нет.
+    Возвращает dict если нарушение:
+    {
+        "pattern": str,          # паттерн фильтра
+        "matched_text": str,     # что именно совпало в тексте
+        "match_type": str,       # "regex", "regex_normalized", "fuzzy", "config"
+    }
     """
     if not text:
-        return False
-        
+        return None
+
     all_filters = (
         [f for f in global_filters if f.is_active] +
         [f for f in chat_filters if f.is_active]
     )
     if not all_filters:
-        return False
+        return None
 
     text_normalized = _normalize(text)
     text_lower = text.lower()
 
-    # ── Проверка встроенных конфиг-паттернов (телефоны, email, ссылки и т.п.) ──
+    # ── Проверка встроенных конфиг-паттернов ──
     for compiled in _CONFIG_PATTERNS:
-        if compiled.search(text):
+        m = compiled.search(text)
+        if m:
             logger.info(f"Config filter hit: pattern='{compiled.pattern}' text='{text[:60]}'")
-            return True
-        if compiled.search(text_normalized):
+            return {
+                "pattern": compiled.pattern,
+                "matched_text": m.group()[:100],
+                "match_type": "config",
+            }
+        m = compiled.search(text_normalized)
+        if m:
             logger.info(f"Config filter hit (normalized): pattern='{compiled.pattern}' text='{text[:60]}'")
-            return True
+            return {
+                "pattern": compiled.pattern,
+                "matched_text": m.group()[:100],
+                "match_type": "config_normalized",
+            }
 
     for flt in all_filters:
         pattern = flt.pattern
 
-        # 1. Прямой regex по оригинальному тексту
+        # 1. Прямой regex
         try:
-            if re.search(pattern, text, re.IGNORECASE):
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
                 logger.info(f"Filter hit (direct): pattern='{pattern}' text='{text[:60]}'")
-                return True
+                return {
+                    "pattern": pattern,
+                    "matched_text": m.group()[:100],
+                    "match_type": "regex",
+                }
         except re.error:
             logger.warning(f"Invalid regex pattern id={getattr(flt, 'id', '?')}: {pattern}")
             continue
 
-        # 2. Regex по нормализованному тексту (замена букв цифрами/символами)
+        # 2. Regex по нормализованному тексту
         try:
-            if re.search(pattern, text_normalized, re.IGNORECASE):
+            m = re.search(pattern, text_normalized, re.IGNORECASE)
+            if m:
                 logger.info(f"Filter hit (normalized): pattern='{pattern}' text='{text[:60]}'")
-                return True
+                return {
+                    "pattern": pattern,
+                    "matched_text": m.group()[:100],
+                    "match_type": "regex_normalized",
+                }
         except re.error:
             pass
 
-        # 3. Нечёткое совпадение по словам (только длинные ключевые слова)
+        # 3. Нечёткое совпадение
         keywords = re.findall(r'[а-яёa-z]{5,}', pattern.lower())
         if not keywords:
             continue
@@ -110,6 +130,10 @@ def check_text_against_filters(
             for kw in keywords:
                 if fuzz.ratio(tw, kw) >= fuzzy_threshold:
                     logger.info(f"Filter hit (fuzzy): '{tw}'~'{kw}' text='{text[:60]}'")
-                    return True
+                    return {
+                        "pattern": pattern,
+                        "matched_text": f"{tw} ≈ {kw}",
+                        "match_type": "fuzzy",
+                    }
 
-    return False
+    return None

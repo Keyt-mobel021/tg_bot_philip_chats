@@ -27,7 +27,20 @@ router = Router()
 @router.callback_query(MainMenuCD.filter(F.action == MainMenuAction.chats), CheckUser())
 @router.callback_query(ChatsCD.filter(F.action == ChatsAction.back), CheckUser())
 @router.callback_query(ChatsCD.filter(F.action == ChatsAction.page), CheckUser())
-async def cb_chats_list(call, callback_data, user, is_admin_or_manager):
+async def cb_chats_list(call, callback_data, user, is_admin_or_manager, state: FSMContext):
+    await state.clear()
+    import session_manager
+    session = session_manager.get_session(call.from_user.id)
+    if session:
+        try:
+            await call.bot.delete_message(
+                chat_id=call.message.chat.id,
+                message_id=session["info_msg_id"],
+            )
+        except Exception:
+            pass
+        session_manager.leave_session(call.from_user.id)
+
     page = getattr(callback_data, 'page', 0)
     await show_chats_list(call, user, is_admin_or_manager, page=page)
     await call.answer()
@@ -233,8 +246,89 @@ async def fsm_chat_filters(
 #  Детали чата
 # ══════════════════════════════════════════════
 @router.callback_query(ChatsCD.filter(F.action == ChatsAction.select), CheckUser())
-async def cb_chat_detail(call, callback_data, user, is_admin_or_manager):
-    await show_chat_detail(call, callback_data.chat_id, user, is_admin_or_manager)
+async def cb_chat_detail(
+    call: types.CallbackQuery,
+    callback_data: ChatsCD,
+    user: models.UserTelegram,
+    profile: models.Profile | None,
+    is_admin_or_manager: bool,
+    state: FSMContext,
+):
+    import session_manager
+
+    # Сбрасываем старую сессию если была
+    old_session = session_manager.get_session(call.from_user.id)
+    if old_session:
+        try:
+            await call.bot.delete_message(
+                chat_id=call.message.chat.id,
+                message_id=old_session["info_msg_id"],
+            )
+        except Exception:
+            pass
+        session_manager.leave_session(call.from_user.id)
+    await state.clear()
+
+    chat_id = callback_data.chat_id
+
+    # ═══ АДМИН — карточка чата как раньше ═══
+    if is_admin_or_manager:
+        await show_chat_detail(call, chat_id, user, is_admin_or_manager)
+        await call.answer()
+        return
+
+    # ═══ ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ — СРАЗУ В СЕССИЮ ═══
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await call.answer("Чат не найден", show_alert=True)
+            return
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        if not member:
+            await call.answer("Вы не участник этого чата", show_alert=True)
+            return
+
+    if member.is_blocked:
+        from text_templates import CHAT_FROZEN_VIOLATION_TEXT
+        await call.answer(CHAT_FROZEN_VIOLATION_TEXT, show_alert=True)
+        return
+
+    from states import ChatSessionState
+    from handlers.chat_messages import _send_session_history
+
+    await state.set_state(ChatSessionState.active)
+    await state.update_data(chat_id=chat_id)
+
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    history_msg = await _send_session_history(
+        bot=call.bot,
+        chat_id_tg=call.message.chat.id,
+        chat=chat,
+        page=0,
+        member_id=member.id,
+    )
+
+    info_msg = await call.bot.send_message(
+        chat_id=call.message.chat.id,
+        text=f"💬 <b>Вы в чате «{chat.title}»</b>\n\n"
+             "Просто пишите сообщения — они сразу отправятся в этот чат.\n"
+             "Нажмите «🚪 Выйти» чтобы вернуться.",
+        parse_mode="HTML",
+    )
+
+    session_manager.enter_session(
+        user_tg_id=call.from_user.id,
+        chat_id=chat_id,
+        history_msg_id=history_msg.message_id if history_msg else 0,
+        info_msg_id=info_msg.message_id,
+    )
     await call.answer()
 
 

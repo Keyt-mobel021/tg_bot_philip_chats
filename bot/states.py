@@ -50,3 +50,12 @@ class MemberAliasState(StatesGroup):
 # -=-=- Подтверждения -=-=-
 class ConfirmState(StatesGroup):
     waiting = State()
+
+
+# -=-=- Сессия чата (пользователь «внутри» чата) -=-=-
+class ChatSessionState(StatesGroup):
+    active = State()
+
+# -=-=- Админ-сессия (пишет из истории) -=-=-
+class AdminChatSessionState(StatesGroup):
+    active = State()

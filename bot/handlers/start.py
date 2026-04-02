@@ -47,6 +47,19 @@ async def cmd_menu_button(
     profile: models.Profile | None,
     is_admin_or_manager: bool,
 ):
+    # Сбрасываем сессию
+    import session_manager
+    session = session_manager.get_session(message.from_user.id)
+    if session:
+        try:
+            await message.bot.delete_message(
+                chat_id=message.chat.id,
+                message_id=session["info_msg_id"],
+            )
+        except Exception:
+            pass
+        session_manager.leave_session(message.from_user.id)
+
     await state.clear()
     is_adm = is_admin_or_manager or user.is_admin
     await message.answer(
@@ -81,6 +94,9 @@ async def cb_home(
 @router.message(CommandStart(), CheckUser())
 async def cmd_start(message: types.Message, state: FSMContext, user: models.UserTelegram):
     await state.clear()
+
+    import session_manager
+    session_manager.leave_session(message.from_user.id)
 
     tg = message.from_user
     args = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else ""
@@ -473,6 +489,10 @@ async def fsm_edit_admin_description(message: types.Message, state: FSMContext):
 @router.callback_query(F.data == "cancel")
 async def cb_cancel(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
+
+    import session_manager
+    session_manager.leave_session(call.from_user.id)
+    
     tg = call.from_user
 
     with models.connector:

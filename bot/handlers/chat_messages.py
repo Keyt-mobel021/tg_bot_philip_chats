@@ -1,15 +1,17 @@
 from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
 from loguru import logger
+import asyncio
 
 import models
 import config
 from filters import CheckUser, PhotoFilter
-from keyboards import ChatCD, ChatAction, HistoryCD, HistoryAction
-from keyboards.kb import history_keyboard, cancel_keyboard
-from states import SendMessageState
+from keyboards import ChatCD, ChatAction, HistoryCD, HistoryAction, ChatsCD, ChatsAction
+from keyboards.kb import history_keyboard, session_keyboard, cancel_keyboard
+from states import SendMessageState, ChatSessionState, AdminChatSessionState
 from utils.filters_check import check_text_against_filters
 from utils.broadcast import broadcast_message_to_chat, notify_admins_violation
+import session_manager
 
 from . import *
 
@@ -57,13 +59,94 @@ async def cb_write_from_history(
     callback_data: ChatCD,
     state: FSMContext,
     user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
 ):
-    await _start_write(
-        call, callback_data.chat_id, state, user,
-        from_history=True,
-        history_page=callback_data.page,
-        history_msg_id=call.message.message_id,
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+    if not chat:
+        await call.answer("Чат не найден", show_alert=True)
+        return
+    if chat.is_frozen:
+        await call.answer("❄️ Чат заморожен", show_alert=True)
+        return
+
+    with models.connector:
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+    if not member:
+        await call.answer("Вы не участник этого чата", show_alert=True)
+        return
+    if member.is_blocked:
+        await call.answer("❄️ Чат временно заморожен", show_alert=True)
+        return
+
+    if not is_admin_or_manager:
+        # Обычный пользователь — входим в сессию (уже реализовано)
+        # Сбрасываем старую сессию
+        old_session = session_manager.get_session(call.from_user.id)
+        if old_session:
+            try:
+                await call.bot.delete_message(
+                    chat_id=call.message.chat.id,
+                    message_id=old_session["info_msg_id"],
+                )
+            except Exception:
+                pass
+            session_manager.leave_session(call.from_user.id)
+
+        await state.set_state(ChatSessionState.active)
+        await state.update_data(chat_id=chat_id)
+
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
+
+        history_msg = await _send_session_history(
+            bot=call.bot,
+            chat_id_tg=call.message.chat.id,
+            chat=chat,
+            page=0,
+            member_id=member.id,
+        )
+        info_msg = await call.bot.send_message(
+            chat_id=call.message.chat.id,
+            text=f"💬 <b>Вы в чате «{chat.title}»</b>\n\n"
+                 "Просто пишите — сообщения сразу отправятся.\n"
+                 "Нажмите «🚪 Выйти» чтобы вернуться.",
+            parse_mode="HTML",
+        )
+        session_manager.enter_session(
+            user_tg_id=call.from_user.id,
+            chat_id=chat_id,
+            history_msg_id=history_msg.message_id if history_msg else 0,
+            info_msg_id=info_msg.message_id,
+        )
+        await call.answer()
+        return
+
+    # ═══ АДМИН — входим в админ-сессию ═══
+    await state.set_state(AdminChatSessionState.active)
+    await state.update_data(
+        chat_id=chat_id,
+        history_msg_id=call.message.message_id,  # message_id текущей истории
     )
+
+    # Отправляем подсказку
+    sent = await call.message.answer(
+        f"✏️ <b>Режим написания в чат «{chat.title}»</b>\n\n"
+        "Пишите сообщения — они будут отправлены в чат.\n"
+        "Нажмите «❌ Отмена» чтобы выйти из режима.",
+        reply_markup=cancel_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.update_data(prompt_msg_id=sent.message_id)
+    await call.answer()
 
 
 async def _start_write(
@@ -359,7 +442,8 @@ async def _process_and_send(
         ))
 
     # ── Проверка фильтров ──────────────────────────────────────
-    if text and not member.is_admin_or_manager and check_text_against_filters(text, chat_filters, global_filters):
+    filter_hit = check_text_against_filters(text, chat_filters, global_filters) if text and not member.is_admin_or_manager else None
+    if filter_hit:
         with models.connector:
             is_client = member.is_client
             company_id = member.company_id_id or 0
@@ -405,6 +489,7 @@ async def _process_and_send(
             is_client_violation=is_client,
             company_id=company_id,
             is_company_mode=is_company_mode,
+            filter_hit=filter_hit, 
         )
         return
 
@@ -423,7 +508,7 @@ async def _process_and_send(
         ))
 
     # ── Рассылка другим участникам ─────────────────────────────
-    await broadcast_message_to_chat(
+    await broadcast_message_to_chat_with_sessions(
         bot=message.bot,
         chat=chat,
         sender_member=member,
@@ -462,8 +547,13 @@ async def _process_and_send(
             await message.delete()
         except Exception:
             pass
+        # Определяем реальный статус
+        with models.connector:
+            _profile = models.Profile.get_or_none(models.Profile.user_id == user.id)
+        _is_admin = _profile.is_admin_or_manager if _profile else False
+
         await show_chat_detail(
-            message, chat_id, user, is_admin_or_manager=False,
+            message, chat_id, user, is_admin_or_manager=_is_admin,
             prefix="✅ Сообщение отправлено!"
         )
 
@@ -531,16 +621,285 @@ async def _send_history_message(
 # ══════════════════════════════════════════════
 
 @router.callback_query(ChatCD.filter(F.action == ChatAction.history), CheckUser())
-async def cb_history(call: types.CallbackQuery, callback_data: ChatCD, user: models.UserTelegram):
-    await _show_history(call, callback_data.chat_id, page=0, user_id=user.id)
+async def cb_history(
+    call: types.CallbackQuery,
+    callback_data: ChatCD,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    chat_id = callback_data.chat_id
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await call.answer("Чат не найден", show_alert=True)
+            return
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+
+    # Админ — просмотр истории без сессии
+    if is_admin_or_manager:
+        await _show_history(call, chat_id, page=0, user_id=user.id)
+        await call.answer()
+        return
+
+    # Обычный пользователь — входим в сессию
+    # Сбрасываем старую сессию если была
+    old_session = session_manager.get_session(call.from_user.id)
+    if old_session:
+        try:
+            await call.bot.delete_message(
+                chat_id=call.message.chat.id,
+                message_id=old_session["info_msg_id"],
+            )
+        except Exception:
+            pass
+        session_manager.leave_session(call.from_user.id)
+
+    await state.set_state(ChatSessionState.active)
+    await state.update_data(chat_id=chat_id)
+
+    # Удаляем текущее сообщение (рассылку или что-то ещё)
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+    history_msg = await _send_session_history(
+        bot=call.bot,
+        chat_id_tg=call.message.chat.id,
+        chat=chat,
+        page=0,
+        member_id=member.id if member else None,
+    )
+
+    info_msg = await call.bot.send_message(
+        chat_id=call.message.chat.id,
+        text=f"💬 <b>Вы в чате «{chat.title}»</b>\n\n"
+             "Просто пишите сообщения — они сразу отправятся.\n"
+             "Нажмите «🚪 Выйти» чтобы вернуться.",
+        parse_mode="HTML",
+    )
+
+    session_manager.enter_session(
+        user_tg_id=call.from_user.id,
+        chat_id=chat_id,
+        history_msg_id=history_msg.message_id if history_msg else 0,
+        info_msg_id=info_msg.message_id,
+    )
     await call.answer()
+
+
+async def _send_session_history(
+    bot,
+    chat_id_tg: int,
+    chat: models.Chat,
+    page: int,
+    member_id: int | None = None,
+) -> types.Message | None:
+    """
+    Отправляет сообщение с историей для режима сессии.
+    Возвращает объект Message чтобы сохранить message_id.
+    Использует session_keyboard вместо history_keyboard.
+    """
+    bot_user = await bot.get_me()
+    bot_username = bot_user.username
+    chat_id_db = chat.id
+    chat_token = str(chat_id_db)
+
+    with models.connector:
+        all_messages = list(
+            models.Message.select()
+            .join(models.ChatMember)
+            .where(
+                (models.ChatMember.chat_id == chat_id_db) &
+                (models.Message.has_forbidden == False)
+            )
+            .order_by(models.Message.date_create.asc())
+        )
+
+    if not all_messages:
+        return await bot.send_message(
+            chat_id=chat_id_tg,
+            text=f"📋 <b>Чат «{chat.title}»</b>\n\n📭 Сообщений пока нет.",
+            reply_markup=session_keyboard(chat_id_db, 0, 1),
+            parse_mode="HTML",
+        )
+
+    blocks = _build_message_blocks(all_messages, bot_username, chat_token)
+    pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
+    total_pages = len(pages)
+    page = max(0, min(page, total_pages - 1))
+
+    if member_id and all_messages:
+        _mark_read(member_id, all_messages[-1].id)
+
+    text_body = "\n\n".join(pages[page])
+    header = f"📋 <b>Чат «{chat.title}»</b> (стр. {page + 1}/{total_pages})\n\n"
+    full_text = header + text_body
+
+    if len(full_text) > 4090:
+        full_text = full_text[:4087] + "…"
+
+    return await bot.send_message(
+        chat_id=chat_id_tg,
+        text=full_text,
+        reply_markup=session_keyboard(chat_id_db, page, total_pages),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def _edit_session_history(
+    bot,
+    chat_id_tg: int,
+    message_id: int,
+    chat: models.Chat,
+    member_id: int | None = None,
+) -> bool:
+    """
+    Обновляет (edit) сообщение с историей в сессии.
+    Возвращает True если успешно, False если ошибка.
+    """
+    bot_user = await bot.get_me()
+    bot_username = bot_user.username
+    chat_id_db = chat.id
+    chat_token = str(chat_id_db)
+
+    with models.connector:
+        all_messages = list(
+            models.Message.select()
+            .join(models.ChatMember)
+            .where(
+                (models.ChatMember.chat_id == chat_id_db) &
+                (models.Message.has_forbidden == False)
+            )
+            .order_by(models.Message.date_create.asc())
+        )
+
+    if not all_messages:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id_tg,
+                message_id=message_id,
+                text=f"📋 <b>Чат «{chat.title}»</b>\n\n📭 Сообщений пока нет.",
+                reply_markup=session_keyboard(chat_id_db, 0, 1),
+                parse_mode="HTML",
+            )
+        except Exception:
+            return False
+        return True
+
+    blocks = _build_message_blocks(all_messages, bot_username, chat_token)
+    pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
+    total_pages = len(pages)
+    # Всегда показываем последнюю (самую новую) страницу
+    page = 0  # page 0 = самая новая (из-за reverse в _split_blocks_into_pages)
+
+    if member_id and all_messages:
+        _mark_read(member_id, all_messages[-1].id)
+
+    text_body = "\n\n".join(pages[page])
+    header = f"📋 <b>Чат «{chat.title}»</b> (стр. {page + 1}/{total_pages})\n\n"
+    full_text = header + text_body
+
+    if len(full_text) > 4090:
+        full_text = full_text[:4087] + "…"
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id_tg,
+            message_id=message_id,
+            text=full_text,
+            reply_markup=session_keyboard(chat_id_db, page, total_pages),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.warning(f"_edit_session_history error: {e}")
+        return False
+    return True
 
 
 @router.callback_query(HistoryCD.filter(F.action == HistoryAction.page), CheckUser())
-async def cb_history_page(call: types.CallbackQuery, callback_data: HistoryCD, user: models.UserTelegram):
-    await _show_history(call, callback_data.chat_id, page=callback_data.page, user_id=user.id)
+async def cb_history_page(
+    call: types.CallbackQuery,
+    callback_data: HistoryCD,
+    user: models.UserTelegram,
+    state: FSMContext,
+    is_admin_or_manager: bool = False,
+):
+    current_state = await state.get_state()
+
+    if current_state == ChatSessionState.active.state:
+        # В сессии — обновляем через edit с session_keyboard
+        await _show_session_history_page(call, callback_data.chat_id, callback_data.page, user.id)
+    else:
+        # Не в сессии (админ просматривает историю) — старое поведение
+        await _show_history(call, callback_data.chat_id, page=callback_data.page, user_id=user.id)
     await call.answer()
 
+
+async def _show_session_history_page(call: types.CallbackQuery, chat_id: int, page: int, user_id: int):
+    """Пагинация внутри сессии — использует session_keyboard."""
+    bot_username = (await call.bot.get_me()).username
+    chat_token = str(chat_id)
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await call.answer("Чат не найден", show_alert=True)
+            return
+
+        all_messages = list(
+            models.Message.select()
+            .join(models.ChatMember)
+            .where(
+                (models.ChatMember.chat_id == chat_id) &
+                (models.Message.has_forbidden == False)
+            )
+            .order_by(models.Message.date_create.asc())
+        )
+
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user_id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        member_id = member.id if member else None
+
+    if not all_messages:
+        await call.message.edit_text(
+            f"📋 <b>Чат «{chat.title}»</b>\n\n📭 Сообщений пока нет.",
+            reply_markup=session_keyboard(chat_id, 0, 1),
+            parse_mode="HTML",
+        )
+        return
+
+    blocks = _build_message_blocks(all_messages, bot_username, chat_token)
+    pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
+    total_pages = len(pages)
+    page = max(0, min(page, total_pages - 1))
+
+    if member_id and all_messages:
+        _mark_read(member_id, all_messages[-1].id)
+
+    text_body = "\n\n".join(pages[page])
+    header = f"📋 <b>Чат «{chat.title}»</b> (стр. {page + 1}/{total_pages})\n\n"
+    full_text = header + text_body
+
+    if len(full_text) > 4090:
+        full_text = full_text[:4087] + "…"
+
+    await call.message.edit_text(
+        full_text,
+        reply_markup=session_keyboard(chat_id, page, total_pages),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 async def _show_history(call: types.CallbackQuery, chat_id: int, page: int, user_id: int):
     bot_username = (await call.bot.get_me()).username
@@ -808,3 +1167,471 @@ async def send_message_media(message: types.Message, msg_id: int, user: models.U
             await message.answer_video_note(video_note=a.id_file)
         else:
             await message.answer_document(document=a.id_file)
+
+
+# ══════════════════════════════════════════════
+#  АДМИН-СЕССИЯ: приём сообщений
+# ══════════════════════════════════════════════
+
+@router.message(AdminChatSessionState.active, CheckUser(), PhotoFilter())
+async def admin_session_handle_media(
+    message: types.Message,
+    state: FSMContext,
+    album: list[types.Message],
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        await state.clear()
+        return
+    first = album[0]
+    await _process_admin_session_message(
+        message=first, state=state, user=user,
+        chat_id=chat_id,
+        text=first.caption or first.text or "",
+        raw_messages=album,
+    )
+
+
+@router.message(AdminChatSessionState.active, CheckUser())
+async def admin_session_handle_text(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        await state.clear()
+        return
+    await _process_admin_session_message(
+        message=message, state=state, user=user,
+        chat_id=chat_id,
+        text=message.text or "",
+        raw_messages=[message],
+    )
+
+
+async def _process_admin_session_message(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    chat_id: int,
+    text: str,
+    raw_messages: list[types.Message],
+):
+    """
+    Обработка сообщения админа в режиме админ-сессии.
+    НЕ сбрасывает state — админ остаётся в режиме написания.
+    Удаляет сообщение, обновляет историю.
+    """
+    data = await state.get_data()
+    history_msg_id = data.get("history_msg_id")
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await state.clear()
+            await message.answer("Чат не найден.")
+            return
+
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        if not member:
+            await state.clear()
+            await message.answer("Вы не участник этого чата.")
+            return
+
+        chat_filters = list(models.ChatFilter.select().where(
+            (models.ChatFilter.chat_id == chat_id) &
+            (models.ChatFilter.is_active == True)
+        ))
+        global_filters = list(models.GlobalFilter.select().where(
+            models.GlobalFilter.is_active == True
+        ))
+
+    # Админы не проверяются на фильтры — сразу отправляем
+
+    # ── Сохраняем сообщение ──
+    with models.connector:
+        db_msg = models.Message.create(
+            member_id=member.id,
+            text=text[:4000] if text else None,
+        )
+        for msg in raw_messages:
+            _extract_attachment(msg, db_msg.id)
+
+    with models.connector:
+        db_attachments = list(models.Attachment.select().where(
+            models.Attachment.message_id == db_msg.id
+        ))
+
+    # ── Удаляем сообщение админа ──
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # ── Рассылка (с учётом сессий!) ──
+    await broadcast_message_to_chat_with_sessions(
+        bot=message.bot,
+        chat=chat,
+        sender_member=member,
+        text=text or None,
+        attachments=db_attachments or None,
+        exclude_member_id=member.id,
+    )
+
+    # ── Обновляем сообщение с историей у админа ──
+    if history_msg_id:
+        bot_username = (await message.bot.get_me()).username
+        chat_token = str(chat_id)
+
+        with models.connector:
+            all_messages = list(
+                models.Message.select()
+                .join(models.ChatMember)
+                .where(
+                    (models.ChatMember.chat_id == chat_id) &
+                    (models.Message.has_forbidden == False)
+                )
+                .order_by(models.Message.date_create.asc())
+            )
+
+        if all_messages:
+            _mark_read(member.id, all_messages[-1].id)
+
+            blocks = _build_message_blocks(all_messages, bot_username, chat_token)
+            pages = _split_blocks_into_pages(blocks, _MAX_PAGE_CHARS)
+            total_pages = len(pages)
+            page = 0  # самая новая страница
+
+            text_body = "\n\n".join(pages[page])
+            header = f"📋 <b>История чата «{chat.title}»</b> (стр. {page + 1}/{total_pages})\n\n"
+            full_text = header + text_body
+
+            if len(full_text) > 4090:
+                full_text = full_text[:4087] + "…"
+
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=history_msg_id,
+                    text=full_text,
+                    reply_markup=history_keyboard(chat_id, page, total_pages),
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning(f"admin session: edit history error: {e}")
+
+
+
+
+# ══════════════════════════════════════════════
+#  СЕССИЯ: приём сообщений
+# ══════════════════════════════════════════════
+
+@router.message(ChatSessionState.active, CheckUser(), PhotoFilter())
+async def session_handle_media(
+    message: types.Message,
+    state: FSMContext,
+    album: list[types.Message],
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        await state.clear()
+        session_manager.leave_session(message.from_user.id)
+        return
+
+    first = album[0]
+    await _process_session_message(
+        message=first,
+        state=state,
+        user=user,
+        chat_id=chat_id,
+        text=first.caption or first.text or "",
+        raw_messages=album,
+    )
+
+
+@router.message(ChatSessionState.active, CheckUser())
+async def session_handle_text(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None = None,
+    is_admin_or_manager: bool = False,
+):
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        await state.clear()
+        session_manager.leave_session(message.from_user.id)
+        return
+
+    await _process_session_message(
+        message=message,
+        state=state,
+        user=user,
+        chat_id=chat_id,
+        text=message.text or "",
+        raw_messages=[message],
+    )
+
+
+async def _process_session_message(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    chat_id: int,
+    text: str,
+    raw_messages: list[types.Message],
+):
+    """
+    Обрабатывает сообщение в режиме сессии.
+    НЕ сбрасывает state — пользователь остаётся в сессии.
+    После отправки обновляет сообщение с историей.
+    """
+    user_tg_id = message.from_user.id
+    session = session_manager.get_session(user_tg_id)
+
+    with models.connector:
+        chat = models.Chat.get_or_none(models.Chat.id == chat_id)
+        if not chat:
+            await state.clear()
+            session_manager.leave_session(user_tg_id)
+            await message.answer("Чат не найден.")
+            return
+
+        if chat.is_frozen:
+            await message.answer("❄️ Чат заморожен — отправка недоступна")
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        member = models.ChatMember.get_or_none(
+            (models.ChatMember.user_id == user.id) &
+            (models.ChatMember.chat_id == chat_id)
+        )
+        if not member:
+            await state.clear()
+            session_manager.leave_session(user_tg_id)
+            await message.answer("Вы не участник этого чата.")
+            return
+
+        if member.is_blocked:
+            from text_templates import CHAT_FROZEN_VIOLATION_TEXT
+            await state.clear()
+            session_manager.leave_session(user_tg_id)
+            await message.answer(CHAT_FROZEN_VIOLATION_TEXT)
+            return
+
+        chat_filters = list(models.ChatFilter.select().where(
+            (models.ChatFilter.chat_id == chat_id) &
+            (models.ChatFilter.is_active == True)
+        ))
+        global_filters = list(models.GlobalFilter.select().where(
+            models.GlobalFilter.is_active == True
+        ))
+
+    # ── Проверка фильтров ──
+    filter_hit = check_text_against_filters(text, chat_filters, global_filters) if text and not member.is_admin_or_manager else None
+    if filter_hit:
+        with models.connector:
+            is_client = member.is_client
+            company_id = member.company_id_id or 0
+            is_company_mode = chat.company_mode
+
+            if is_client:
+                if is_company_mode:
+                    models.ChatMember.update(is_blocked=True).where(
+                        (models.ChatMember.chat_id == chat_id) &
+                        (models.ChatMember.member_type == models.MemberType.CLIENT)
+                    ).execute()
+                elif company_id:
+                    models.ChatMember.update(is_blocked=True).where(
+                        (models.ChatMember.chat_id == chat_id) &
+                        (models.ChatMember.company_id == company_id)
+                    ).execute()
+                    models.Company.update(is_blocked=True).where(
+                        models.Company.id == company_id
+                    ).execute()
+                else:
+                    member.is_blocked = True
+                    member.save()
+            else:
+                if not member.is_admin_or_manager:
+                    member.is_blocked = True
+                    member.save()
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        from text_templates import CHAT_FROZEN_VIOLATION_TEXT
+        await state.clear()
+        session_manager.leave_session(user_tg_id)
+        await message.answer(CHAT_FROZEN_VIOLATION_TEXT)
+
+        await notify_admins_violation(
+            message.bot, chat, member, text,
+            is_client_violation=is_client,
+            company_id=company_id,
+            is_company_mode=is_company_mode,
+        )
+        return
+
+    # ── Сохраняем сообщение ──
+    with models.connector:
+        db_msg = models.Message.create(
+            member_id=member.id,
+            text=text[:4000] if text else None,
+        )
+        for msg in raw_messages:
+            _extract_attachment(msg, db_msg.id)
+
+    with models.connector:
+        db_attachments = list(models.Attachment.select().where(
+            models.Attachment.message_id == db_msg.id
+        ))
+
+    # ── Удаляем сообщение пользователя ──
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # ── Рассылка другим участникам (с учётом сессий!) ──
+    await broadcast_message_to_chat_with_sessions(
+        bot=message.bot,
+        chat=chat,
+        sender_member=member,
+        text=text or None,
+        attachments=db_attachments or None,
+        exclude_member_id=member.id,
+    )
+
+    # ── Обновляем сообщение с историей у отправителя ──
+    if session and session.get("history_msg_id"):
+        await _edit_session_history(
+            bot=message.bot,
+            chat_id_tg=user_tg_id,
+            message_id=session["history_msg_id"],
+            chat=chat,
+            member_id=member.id,
+        )
+
+async def broadcast_message_to_chat_with_sessions(
+    bot,
+    chat: models.Chat,
+    sender_member: models.ChatMember,
+    text: str | None,
+    attachments: list[models.Attachment] | None = None,
+    exclude_member_id: int | None = None,
+):
+    """
+    Рассылает сообщение с учётом активных сессий.
+    - Если получатель в сессии этого чата:
+      1) Отправить простое текстовое сообщение БЕЗ КНОПОК
+      2) Обновить его историю (edit)
+      3) Через 10 секунд удалить временное сообщение
+    - Если НЕ в сессии: обычная рассылка с кнопками.
+    """
+    from keyboards.kb import broadcast_reply_keyboard
+    from utils.broadcast import _build_header, _send_with_attachments
+
+    with models.connector:
+        members = list(
+            models.ChatMember.select()
+            .where(
+                (models.ChatMember.chat_id == chat.id) &
+                (models.ChatMember.is_blocked == False)
+            )
+        )
+
+    header = _build_header(sender_member, chat)
+    full_text = f"{header}\n\n{text}" if text else header
+
+    for member in members:
+        if member.id == exclude_member_id:
+            continue
+        if not member.user_id_id:
+            continue
+
+        user_tg_id = member.user_id_id
+        session = session_manager.get_session(user_tg_id)
+
+        if session and session["chat_id"] == chat.id:
+            # ════════════════════════════════════════
+            #  Получатель В СЕССИИ этого чата
+            # ════════════════════════════════════════
+            try:
+                # Добавляем пометку о вложениях
+                session_text = full_text
+                if attachments:
+                    att_count = len(attachments)
+                    session_text += f"\n\n📎 +{att_count} вложен."
+
+                temp_msg = await bot.send_message(
+                    chat_id=user_tg_id,
+                    text=session_text,  # <-- было full_text
+                    parse_mode="HTML",
+                )
+
+                # 2. Сразу обновляем историю у получателя
+                history_msg_id = session.get("history_msg_id")
+                if history_msg_id:
+                    await _edit_session_history(
+                        bot=bot,
+                        chat_id_tg=user_tg_id,
+                        message_id=history_msg_id,
+                        chat=chat,
+                        member_id=member.id,
+                    )
+
+                # 3. Через 10 секунд удаляем временное сообщение
+                asyncio.create_task(_delayed_delete(bot, user_tg_id, temp_msg.message_id, delay=10))
+
+            except Exception as e:
+                logger.warning(f"session broadcast failed for {user_tg_id}: {e}")
+        else:
+            # ════════════════════════════════════════
+            #  Получатель НЕ в сессии — обычная рассылка
+            # ════════════════════════════════════════
+            reply_kb = broadcast_reply_keyboard(chat.id)
+            try:
+                if attachments:
+                    await _send_with_attachments(bot, user_tg_id, full_text, attachments, reply_kb)
+                else:
+                    await bot.send_message(
+                        chat_id=user_tg_id,
+                        text=full_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_kb,
+                    )
+            except Exception as e:
+                logger.warning(f"broadcast failed for {user_tg_id}: {e}")
+
+
+async def _delayed_delete(bot, chat_id: int, message_id: int, delay: int = 10):
+    """Удаляет сообщение через delay секунд."""
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
