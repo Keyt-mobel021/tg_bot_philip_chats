@@ -24,6 +24,7 @@ WELCOME_TEXT = """\
 
 # Кнопка постоянного меню (reply keyboard)
 MENU_BUTTON_TEXT = "📋 Меню"
+CHATS_BUTTON_TEXT = "💬 Чаты"
 
 # Сообщение при нажатии кнопки «Меню» из reply keyboard
 MENU_REPLY_HINT = "📋 Откройте главное меню:"

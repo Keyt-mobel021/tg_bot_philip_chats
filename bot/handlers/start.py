@@ -10,7 +10,7 @@ import text_templates
 from keyboards import *
 from keyboards.kb import (
     main_menu_keyboard, chat_description_keyboard, cancel_keyboard,
-    menu_reply_keyboard,
+    menu_reply_keyboard, chats_reply_keyboard,
 )
 from states import ChatEditState
 
@@ -39,6 +39,31 @@ def _get_welcome_text() -> str:
 #  Постоянная Reply-кнопка «Меню»
 # ══════════════════════════════════════════════
 
+@router.message(F.text == text_templates.CHATS_BUTTON_TEXT, CheckUser())
+async def cmd_chats_button(
+    message: types.Message,
+    state: FSMContext,
+    user: models.UserTelegram,
+    profile: models.Profile | None,
+    is_admin_or_manager: bool,
+):
+    # Сбрасываем сессию
+    import session_manager
+    session = session_manager.get_session(message.from_user.id)
+    if session:
+        try:
+            await message.bot.delete_message(
+                chat_id=message.chat.id,
+                message_id=session["info_msg_id"],
+            )
+        except Exception:
+            pass
+        session_manager.leave_session(message.from_user.id)
+
+    await state.clear()
+    from handlers import show_chats_list
+    await show_chats_list(message, user, is_admin_or_manager=is_admin_or_manager)
+
 @router.message(F.text == text_templates.MENU_BUTTON_TEXT, CheckUser())
 async def cmd_menu_button(
     message: types.Message,
@@ -63,17 +88,22 @@ async def cmd_menu_button(
     await state.clear()
     is_adm = is_admin_or_manager or user.is_admin
 
-    # Показываем правила перед меню
-    welcome_text = _get_welcome_text()
-    await message.answer(
-        welcome_text,
-        parse_mode="HTML",
-        reply_markup=menu_reply_keyboard(),
-    )
-    await message.answer(
-        text_templates.MENU_REPLY_HINT,
-        reply_markup=main_menu_keyboard(is_admin_or_manager=is_adm),
-    )
+    if is_adm:
+        # Админ/руководитель — показываем правила + главное меню
+        welcome_text = _get_welcome_text()
+        await message.answer(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=menu_reply_keyboard(),
+        )
+        await message.answer(
+            text_templates.MENU_REPLY_HINT,
+            reply_markup=main_menu_keyboard(is_admin_or_manager=True),
+        )
+    else:
+        # Обычный пользователь/сотрудник — сразу список чатов
+        from handlers import show_chats_list
+        await show_chats_list(message, user, is_admin_or_manager=False)
 
 
 # ══════════════════════════════════════════════
@@ -131,10 +161,11 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
         logger.info(f"Profile {profile.id} ({profile.name}) connected to user {tg.id}")
 
+        _is_adm = profile.is_admin_or_manager
         await message.answer(
             welcome_text,
             parse_mode="HTML",
-            reply_markup=menu_reply_keyboard(),
+            reply_markup=menu_reply_keyboard() if _is_adm else chats_reply_keyboard(),
         )
         await message.answer(
             f"✅ Вы подключены как <b>{profile.name}</b> ({profile.type_label}).\n\n"
@@ -179,7 +210,7 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
             await message.answer(
                 welcome_text,
                 parse_mode="HTML",
-                reply_markup=menu_reply_keyboard(),
+                reply_markup=menu_reply_keyboard() if is_adm else chats_reply_keyboard(),
             )
             await message.answer(
                 f"✅ Вы подключены к чату <b>{chat_name}</b>!\n\n"
@@ -231,10 +262,11 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
 
         logger.info(f"User {tg.id} joined chat {chat.id} via multi-use invite link {token}")
 
+        is_adm = (profile and profile.is_admin_or_manager) or user.is_admin
         await message.answer(
             welcome_text,
             parse_mode="HTML",
-            reply_markup=menu_reply_keyboard(),
+            reply_markup=menu_reply_keyboard() if is_adm else chats_reply_keyboard(),
         )
         await message.answer(
             f"✅ Вы подключены к чату <b>{chat.title}</b>!\n\n"
@@ -265,11 +297,10 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         profile = models.Profile.get_or_none(models.Profile.user_id == tg.id)
 
     is_adm = (profile and profile.is_admin_or_manager) or user.is_admin
-
     await message.answer(
         welcome_text,
         parse_mode="HTML",
-        reply_markup=menu_reply_keyboard(),
+        reply_markup=menu_reply_keyboard() if is_adm else chats_reply_keyboard(),
     )
 
     if is_adm:

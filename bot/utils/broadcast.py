@@ -134,14 +134,26 @@ async def notify_admins_violation(
         is_company_mode=is_company_mode,
     )
 
-    admin_user_ids = [m.user_id_id for m in admin_members if m.user_id_id]
+    # Собираем UID из участников-админов чата
+    admin_user_ids = set(m.user_id_id for m in admin_members if m.user_id_id)
 
-    if not admin_user_ids:
-        with models.connector:
-            global_admins = list(
-                models.UserTelegram.select().where(models.UserTelegram.is_admin == True)
+    # ВСЕГДА добавляем глобальных админов и руководителей
+    with models.connector:
+        global_admins = list(
+            models.UserTelegram.select().where(models.UserTelegram.is_admin == True)
+        )
+        # Также находим всех пользователей с профилем admin/manager
+        admin_profiles = list(
+            models.Profile.select().where(
+                models.Profile.profile_type.in_([
+                    models.ProfileType.ADMIN, models.ProfileType.MANAGER,
+                ]) &
+                (models.Profile.user_id.is_null(False))
             )
-        admin_user_ids = [u.id for u in global_admins]
+        )
+    admin_user_ids.update(u.id for u in global_admins)
+    admin_user_ids.update(p.user_id_id for p in admin_profiles if p.user_id_id)
+    admin_user_ids = list(admin_user_ids)
 
     for uid in admin_user_ids:
         try:

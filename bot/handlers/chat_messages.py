@@ -489,7 +489,7 @@ async def _process_and_send(
             is_client_violation=is_client,
             company_id=company_id,
             is_company_mode=is_company_mode,
-            filter_hit=filter_hit, 
+            filter_hit=filter_hit,
         )
         return
 
@@ -1493,6 +1493,7 @@ async def _process_session_message(
             is_client_violation=is_client,
             company_id=company_id,
             is_company_mode=is_company_mode,
+            filter_hit=filter_hit,
         )
         return
 

@@ -15,6 +15,11 @@ def menu_reply_keyboard() -> ReplyKeyboardMarkup:
     builder.add(KeyboardButton(text=text_templates.MENU_BUTTON_TEXT))
     return builder.as_markup(resize_keyboard=True, persistent=True)
 
+def chats_reply_keyboard() -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text=text_templates.CHATS_BUTTON_TEXT))
+    return builder.as_markup(resize_keyboard=True, persistent=True)
+
 
 # ──────────────────────────────────────────────
 #  Главное меню
