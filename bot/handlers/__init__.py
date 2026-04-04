@@ -214,13 +214,21 @@ async def show_staff_detail(
     title_parts.append(profile.name)
     display_title = " — ".join(title_parts)
 
+    # Ссылка для подключения Telegram
+    if not tg_linked:
+        import config
+        connect_link = f"https://t.me/{config.BOT_USERNAME}?start=pe_{profile.connect_token}"
+        tg_line = f"🔗 Telegram: ❌ Не подключён\n\n📎 <b>Ссылка для подключения:</b>\n<code>{connect_link}</code>"
+    else:
+        tg_line = "🔗 Telegram: ✅ Подключён"
+
     text = (
         (prefix + "\n\n" if prefix else "") +
         f"👤 <b>{display_title}</b>\n\n"
         f"🎭 Роль: {profile.type_label}\n"
         f"💼 Должность: {profile.position or '—'}\n"
         f"📊 Статус: {status}\n"
-        f"🔗 Telegram: {tg_status}\n"
+        f"{tg_line}\n"
         f"💬 Чатов: {chats_count}\n"
         f"📨 Сообщений: {msgs_count}"
     )

@@ -62,6 +62,14 @@ async def cmd_menu_button(
 
     await state.clear()
     is_adm = is_admin_or_manager or user.is_admin
+
+    # Показываем правила перед меню
+    welcome_text = _get_welcome_text()
+    await message.answer(
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=menu_reply_keyboard(),
+    )
     await message.answer(
         text_templates.MENU_REPLY_HINT,
         reply_markup=main_menu_keyboard(is_admin_or_manager=is_adm),
@@ -264,16 +272,22 @@ async def cmd_start(message: types.Message, state: FSMContext, user: models.User
         reply_markup=menu_reply_keyboard(),
     )
 
-    greeting = f"👋 Привет, <b>{tg.full_name or 'пользователь'}</b>!\n\n"
-    if profile:
-        greeting += f"Вы вошли как: <b>{profile.name}</b> ({profile.type_label})\n\n"
-    greeting += "Выберите действие:"
+    if is_adm:
+        # Админ/руководитель — показываем главное меню
+        greeting = f"👋 Привет, <b>{tg.full_name or 'пользователь'}</b>!\n\n"
+        if profile:
+            greeting += f"Вы вошли как: <b>{profile.name}</b> ({profile.type_label})\n\n"
+        greeting += "Выберите действие:"
 
-    await message.answer(
-        greeting,
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(is_admin_or_manager=is_adm),
-    )
+        await message.answer(
+            greeting,
+            parse_mode="HTML",
+            reply_markup=main_menu_keyboard(is_admin_or_manager=is_adm),
+        )
+    else:
+        # Обычный пользователь/сотрудник — сразу список чатов
+        from handlers import show_chats_list
+        await show_chats_list(message, user, is_admin_or_manager=False)
 
 
 # ══════════════════════════════════════════════
